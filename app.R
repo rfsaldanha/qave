@@ -241,6 +241,7 @@ server <- function(input, output, session) {
   state <- reactiveValues(
     started = FALSE,
     finished = FALSE,
+    viewing_leaderboard = FALSE,
     username = "",
     score = 0L,
     current_index = 1L,
@@ -270,6 +271,7 @@ server <- function(input, output, session) {
   start_game <- function(username) {
     state$started <- TRUE
     state$finished <- FALSE
+    state$viewing_leaderboard <- FALSE
     state$username <- username
     state$score <- 0L
     state$current_index <- 1L
@@ -299,6 +301,15 @@ server <- function(input, output, session) {
     }
 
     start_game(username)
+  })
+
+  observeEvent(input$show_leaderboard, {
+    state$viewing_leaderboard <- TRUE
+    state$leaderboard <- read_leaderboard(10L)
+  })
+
+  observeEvent(input$back_to_start, {
+    state$viewing_leaderboard <- FALSE
   })
 
   observeEvent(input$submit_guess, {
@@ -340,13 +351,27 @@ server <- function(input, output, session) {
 
   output$app_body <- renderUI({
     if (!state$started) {
+      if (state$viewing_leaderboard) {
+        return(
+          div(
+            class = "panel-card",
+            h3("Top 10 pontuações"),
+            tableOutput("leaderboard_table"),
+            div(style = "margin-top: 18px;"),
+            actionButton("back_to_start", "Voltar", class = "btn-warning")
+          )
+        )
+      }
+
       return(
         div(
           class = "panel-card",
           h3("Comece uma nova partida"),
           p("Escolha um nome de usuário e tente identificar 10 aves sorteadas aleatoriamente."),
           textInput("username", "Nome de usuário"),
-          actionButton("start_game", "Começar a jogar", class = "btn-success")
+          actionButton("start_game", "Começar a jogar", class = "btn-success"),
+          div(style = "margin-top: 12px;"),
+          actionButton("show_leaderboard", "Ver ranking", class = "btn-warning")
         )
       )
     }
@@ -396,7 +421,7 @@ server <- function(input, output, session) {
   })
 
   output$leaderboard_table <- renderTable({
-    req(state$finished, !is.null(state$leaderboard))
+    req((state$finished || state$viewing_leaderboard), !is.null(state$leaderboard))
 
     leaderboard <- state$leaderboard
     names(leaderboard) <- c("Usuário", "Pontuação Total", "Partidas Jogadas", "Melhor Partida", "Última Pontuação", "Última Partida")
