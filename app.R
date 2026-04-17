@@ -47,10 +47,16 @@ load_species_data <- function(path = "wikiaves_species_rj.parquet") {
     ) |>
     dplyr::mutate(
       # Keep only usable media URLs and precompute one display photo per species.
-      photo_urls = lapply(photo_urls, function(urls) urls[!is.na(urls) & nzchar(urls)]),
+      photo_urls = lapply(photo_urls, function(urls) {
+        urls[!is.na(urls) & nzchar(urls)]
+      }),
       round_photo = vapply(photo_urls, sample_species_photo, character(1)),
       common_name_norm = vapply(common_name, normalize_answer, character(1)),
-      scientific_name_norm = vapply(scientific_name, normalize_answer, character(1))
+      scientific_name_norm = vapply(
+        scientific_name,
+        normalize_answer,
+        character(1)
+      )
     ) |>
     dplyr::filter(!is.na(round_photo), nzchar(round_photo)) |>
     dplyr::distinct(common_name, scientific_name, .keep_all = TRUE)
@@ -96,7 +102,12 @@ init_db <- function(path = db_path) {
 }
 
 # Save one finished game and update the aggregate leaderboard for the same user.
-record_score <- function(username, score, rounds = round_count, path = db_path) {
+record_score <- function(
+  username,
+  score,
+  rounds = round_count,
+  path = db_path
+) {
   conn <- DBI::dbConnect(RSQLite::SQLite(), path)
   on.exit(DBI::dbDisconnect(conn), add = TRUE)
 
@@ -162,7 +173,8 @@ ui <- page_fluid(
   theme = app_theme,
   tags$head(
     # Custom CSS gives the game a card-based layout and bird-focused styling.
-    tags$style(HTML("
+    tags$style(HTML(
+      "
       body {
         background:
           radial-gradient(circle at top left, rgba(240,180,41,0.24), transparent 28%),
@@ -249,15 +261,21 @@ ui <- page_fluid(
         font-size: 0.95rem;
         color: #52606d;
       }
-    "))
+    "
+    ))
   ),
   div(
     class = "shell",
     div(
       class = "hero",
       h1("Que ave é essa?"),
-      p("Tente identificar aves observadas no estado do Rio de Janeiro usando a foto e a vocalização. Vale tanto o nome popular quanto o nome científico."),
-      p(class = "credits", "Créditos de nomes, imagens e sons: WikiAves.")
+      p(
+        "Tente identificar aves observadas no estado do Rio de Janeiro usando a foto e a vocalização. Vale tanto o nome popular quanto o nome científico."
+      ),
+      p(
+        class = "credits",
+        "Créditos de nomes, definições, imagens e sons: WikiAves."
+      )
     ),
     uiOutput("app_body")
   )
@@ -313,7 +331,12 @@ server <- function(input, output, session) {
       dplyr::select(common_name, scientific_name, common_name_norm)
 
     dplyr::bind_rows(
-      dplyr::select(species_row, common_name, scientific_name, common_name_norm),
+      dplyr::select(
+        species_row,
+        common_name,
+        scientific_name,
+        common_name_norm
+      ),
       distractors
     ) |>
       dplyr::slice_sample(n = 4L)
@@ -386,7 +409,10 @@ server <- function(input, output, session) {
     username <- trimws(input_value(input$username))
 
     if (!nzchar(username)) {
-      showNotification("Informe um nome de usuário antes de começar.", type = "error")
+      showNotification(
+        "Informe um nome de usuário antes de começar.",
+        type = "error"
+      )
       return()
     }
 
@@ -409,19 +435,29 @@ server <- function(input, output, session) {
     guess <- normalize_answer(input_value(input$guess))
 
     if (!nzchar(guess)) {
-      showNotification("Selecione uma das 4 opções antes de enviar sua resposta.", type = "warning")
+      showNotification(
+        "Selecione uma das 4 opções antes de enviar sua resposta.",
+        type = "warning"
+      )
       return()
     }
 
     species <- current_species()
-    accepted <- c(species$common_name_norm[[1]], species$scientific_name_norm[[1]])
+    accepted <- c(
+      species$common_name_norm[[1]],
+      species$scientific_name_norm[[1]]
+    )
     matched <- guess %in% accepted
 
     if (matched) {
       state$score <- state$score + 1L
       state$feedback <- list(
         class = "ok",
-        title = sprintf("Acertou! Era %s (%s).", species$common_name[[1]], species$scientific_name[[1]]),
+        title = sprintf(
+          "Acertou! Era %s (%s).",
+          species$common_name[[1]],
+          species$scientific_name[[1]]
+        ),
         # Show the short description in-app and keep the full WikiAves page one click away.
         description = species$brief_description[[1]],
         link = species$wiki_url[[1]]
@@ -429,7 +465,11 @@ server <- function(input, output, session) {
     } else {
       state$feedback <- list(
         class = "nope",
-        title = sprintf("Dessa vez não. A resposta era %s (%s).", species$common_name[[1]], species$scientific_name[[1]]),
+        title = sprintf(
+          "Dessa vez não. A resposta era %s (%s).",
+          species$common_name[[1]],
+          species$scientific_name[[1]]
+        ),
         description = species$brief_description[[1]],
         link = species$wiki_url[[1]]
       )
@@ -468,7 +508,9 @@ server <- function(input, output, session) {
         div(
           class = "panel-card",
           h3("Comece uma nova partida"),
-          p("Escolha um nome de usuário e tente identificar 10 aves sorteadas aleatoriamente."),
+          p(
+            "Escolha um nome de usuário e tente identificar 10 aves sorteadas aleatoriamente."
+          ),
           textInput("username", "Nome de usuário"),
           actionButton("start_game", "Começar a jogar", class = "btn-success"),
           div(style = "margin-top: 12px;"),
@@ -479,7 +521,11 @@ server <- function(input, output, session) {
 
     if (!state$finished) {
       species <- current_species()
-      progress_label <- sprintf("Rodada %d de %d", state$current_index, round_count)
+      progress_label <- sprintf(
+        "Rodada %d de %d",
+        state$current_index,
+        round_count
+      )
       score_label <- sprintf("Pontuação: %d", state$score)
 
       return(
@@ -494,24 +540,45 @@ server <- function(input, output, session) {
               span(score_label)
             ),
             feedback_ui(state$feedback),
-            tags$img(class = "bird-photo", src = species$round_photo[[1]], alt = species$common_name[[1]]),
+            tags$img(
+              class = "bird-photo",
+              src = species$round_photo[[1]],
+              alt = species$common_name[[1]]
+            ),
             tags$div(
               style = "margin: 18px 0;",
-              tags$audio(src = species$audio_url[[1]], controls = NA, preload = "none", style = "width: 100%;")
+              tags$audio(
+                src = species$audio_url[[1]],
+                controls = NA,
+                preload = "none",
+                style = "width: 100%;"
+              )
             ),
             radioButtons(
               "guess",
               "Escolha uma opção",
-              choiceNames = unname(lapply(seq_len(nrow(state$current_choices)), function(i) {
-                tags$span(
-                  state$current_choices$common_name[[i]],
-                  " ",
-                  tags$em(sprintf("(%s)", state$current_choices$scientific_name[[i]]))
-                )
-              })),
-              choiceValues = unname(as.character(state$current_choices$common_name_norm))
+              choiceNames = unname(lapply(
+                seq_len(nrow(state$current_choices)),
+                function(i) {
+                  tags$span(
+                    state$current_choices$common_name[[i]],
+                    " ",
+                    tags$em(sprintf(
+                      "(%s)",
+                      state$current_choices$scientific_name[[i]]
+                    ))
+                  )
+                }
+              )),
+              choiceValues = unname(as.character(
+                state$current_choices$common_name_norm
+              ))
             ),
-            actionButton("submit_guess", "Enviar resposta", class = "btn-warning")
+            actionButton(
+              "submit_guess",
+              "Enviar resposta",
+              class = "btn-warning"
+            )
           )
         )
       )
@@ -520,7 +587,15 @@ server <- function(input, output, session) {
     div(
       class = "panel-card",
       h3("Partida concluída"),
-      p(class = "score-highlight", sprintf("%s fez %d de %d pontos.", state$username, state$score, round_count)),
+      p(
+        class = "score-highlight",
+        sprintf(
+          "%s fez %d de %d pontos.",
+          state$username,
+          state$score,
+          round_count
+        )
+      ),
       feedback_ui(state$feedback),
       h4(class = "leader-title", "Top 10 pontuações"),
       tableOutput("leaderboard_table"),
@@ -530,13 +605,29 @@ server <- function(input, output, session) {
   })
 
   # Render the leaderboard table with localized column labels.
-  output$leaderboard_table <- renderTable({
-    req((state$finished || state$viewing_leaderboard), !is.null(state$leaderboard))
+  output$leaderboard_table <- renderTable(
+    {
+      req(
+        (state$finished || state$viewing_leaderboard),
+        !is.null(state$leaderboard)
+      )
 
-    leaderboard <- state$leaderboard
-    names(leaderboard) <- c("Usuário", "Pontuação Total", "Partidas Jogadas", "Melhor Partida", "Última Pontuação", "Última Partida")
-    leaderboard
-  }, striped = TRUE, hover = TRUE, bordered = FALSE, spacing = "m")
+      leaderboard <- state$leaderboard
+      names(leaderboard) <- c(
+        "Usuário",
+        "Pontuação Total",
+        "Partidas Jogadas",
+        "Melhor Partida",
+        "Última Pontuação",
+        "Última Partida"
+      )
+      leaderboard
+    },
+    striped = TRUE,
+    hover = TRUE,
+    bordered = FALSE,
+    spacing = "m"
+  )
 }
 
 # Launch the Shiny application.
