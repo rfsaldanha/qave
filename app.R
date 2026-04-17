@@ -243,7 +243,7 @@ ui <- page_fluid(
     div(
       class = "hero",
       h1("Que ave é essa?"),
-      p("Tente identificar cada espécie usando a foto e a vocalização. Vale tanto o nome popular quanto o nome científico."),
+      p("Tente identificar aves observadas no estado do Rio de Janeiro usando a foto e a vocalização. Vale tanto o nome popular quanto o nome científico."),
       p(class = "credits", "Créditos de nomes, imagens e sons: WikiAves.")
     ),
     uiOutput("app_body")
