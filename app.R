@@ -18,22 +18,35 @@ normalize_answer <- function(value) {
   trimws(normalized)
 }
 
-load_species_data <- function(path = "scrap_wikiaves/species_media.parquet") {
+sample_species_photo <- function(photo_urls) {
+  valid_photos <- photo_urls[!is.na(photo_urls) & nzchar(photo_urls)]
+
+  if (length(valid_photos) == 0) {
+    return(NA_character_)
+  }
+
+  sample(valid_photos, size = 1)
+}
+
+load_species_data <- function(path = "wikiaves_species_rj.parquet") {
   species <- arrow::read_parquet(path) |>
+    as.data.frame() |>
     dplyr::filter(
       !is.na(common_name),
       !is.na(scientific_name),
-      !is.na(main_photo),
-      !is.na(audio_mp3),
+      !is.na(audio_url),
       nzchar(common_name),
       nzchar(scientific_name),
-      nzchar(main_photo),
-      nzchar(audio_mp3)
+      nzchar(audio_url),
+      lengths(photo_urls) > 0
     ) |>
     dplyr::mutate(
+      photo_urls = lapply(photo_urls, function(urls) urls[!is.na(urls) & nzchar(urls)]),
+      round_photo = vapply(photo_urls, sample_species_photo, character(1)),
       common_name_norm = vapply(common_name, normalize_answer, character(1)),
       scientific_name_norm = vapply(scientific_name, normalize_answer, character(1))
     ) |>
+    dplyr::filter(!is.na(round_photo), nzchar(round_photo)) |>
     dplyr::distinct(common_name, scientific_name, .keep_all = TRUE)
 
   if (nrow(species) < round_count) {
@@ -252,6 +265,24 @@ server <- function(input, output, session) {
     score_saved = FALSE
   )
 
+  feedback_ui <- function(feedback) {
+    if (is.null(feedback)) {
+      return(NULL)
+    }
+
+    div(
+      class = paste("feedback", feedback$class),
+      tags$strong(feedback$title),
+      tags$p(style = "margin: 8px 0 0;", feedback$description),
+      tags$a(
+        href = feedback$link,
+        target = "_blank",
+        rel = "noopener noreferrer",
+        "Ver descrição completa no WikiAves"
+      )
+    )
+  }
+
   current_species <- reactive({
     req(state$started, !state$finished, !is.null(state$questions))
     state$questions[state$current_index, , drop = FALSE]
@@ -299,7 +330,10 @@ server <- function(input, output, session) {
   }
 
   start_game <- function(username) {
-    questions <- dplyr::slice_sample(species_data, n = round_count)
+    questions <- dplyr::slice_sample(species_data, n = round_count) |>
+      dplyr::mutate(
+        round_photo = vapply(photo_urls, sample_species_photo, character(1))
+      )
 
     state$started <- TRUE
     state$finished <- FALSE
@@ -361,12 +395,16 @@ server <- function(input, output, session) {
       state$score <- state$score + 1L
       state$feedback <- list(
         class = "ok",
-        text = sprintf("Acertou! Era %s (%s).", species$common_name[[1]], species$scientific_name[[1]])
+        title = sprintf("Acertou! Era %s (%s).", species$common_name[[1]], species$scientific_name[[1]]),
+        description = species$brief_description[[1]],
+        link = species$wiki_url[[1]]
       )
     } else {
       state$feedback <- list(
         class = "nope",
-        text = sprintf("Dessa vez não. A resposta era %s (%s).", species$common_name[[1]], species$scientific_name[[1]])
+        title = sprintf("Dessa vez não. A resposta era %s (%s).", species$common_name[[1]], species$scientific_name[[1]]),
+        description = species$brief_description[[1]],
+        link = species$wiki_url[[1]]
       )
     }
 
@@ -425,13 +463,11 @@ server <- function(input, output, session) {
               span(sprintf("Jogador: %s", state$username)),
               span(score_label)
             ),
-            if (!is.null(state$feedback)) {
-              div(class = paste("feedback", state$feedback$class), state$feedback$text)
-            },
-            tags$img(class = "bird-photo", src = species$main_photo[[1]], alt = species$common_name[[1]]),
+            feedback_ui(state$feedback),
+            tags$img(class = "bird-photo", src = species$round_photo[[1]], alt = species$common_name[[1]]),
             tags$div(
               style = "margin: 18px 0;",
-              tags$audio(src = species$audio_mp3[[1]], controls = NA, preload = "none", style = "width: 100%;")
+              tags$audio(src = species$audio_url[[1]], controls = NA, preload = "none", style = "width: 100%;")
             ),
             radioButtons(
               "guess",
@@ -455,9 +491,7 @@ server <- function(input, output, session) {
       class = "panel-card",
       h3("Partida concluída"),
       p(class = "score-highlight", sprintf("%s fez %d de %d pontos.", state$username, state$score, round_count)),
-      if (!is.null(state$feedback)) {
-        div(class = paste("feedback", state$feedback$class), state$feedback$text)
-      },
+      feedback_ui(state$feedback),
       h4(class = "leader-title", "Top 10 pontuações"),
       tableOutput("leaderboard_table"),
       div(style = "margin-top: 18px;"),
