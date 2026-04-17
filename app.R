@@ -246,6 +246,7 @@ server <- function(input, output, session) {
     score = 0L,
     current_index = 1L,
     questions = NULL,
+    current_choices = NULL,
     feedback = NULL,
     leaderboard = NULL,
     score_saved = FALSE
@@ -256,8 +257,37 @@ server <- function(input, output, session) {
     state$questions[state$current_index, , drop = FALSE]
   })
 
-  reset_round_input <- function() {
-    updateTextInput(session, "guess", value = "")
+  build_round_choices <- function(species_row) {
+    correct_option <- species_row$common_name[[1]]
+    distractors <- species_data |>
+      dplyr::filter(common_name != correct_option) |>
+      dplyr::slice_sample(n = 3L) |>
+      dplyr::select(common_name, scientific_name, common_name_norm)
+
+    dplyr::bind_rows(
+      dplyr::select(species_row, common_name, scientific_name, common_name_norm),
+      distractors
+    ) |>
+      dplyr::slice_sample(n = 4L)
+  }
+
+  reset_round_input <- function(choices = character(0)) {
+    choice_names <- unname(lapply(seq_len(nrow(choices)), function(i) {
+      tags$span(
+        choices$common_name[[i]],
+        " ",
+        tags$em(sprintf("(%s)", choices$scientific_name[[i]]))
+      )
+    }))
+    choice_values <- unname(as.character(choices$common_name_norm))
+
+    updateRadioButtons(
+      session,
+      "guess",
+      choiceNames = choice_names,
+      choiceValues = choice_values,
+      selected = character(0)
+    )
   }
 
   input_value <- function(value) {
@@ -269,17 +299,20 @@ server <- function(input, output, session) {
   }
 
   start_game <- function(username) {
+    questions <- dplyr::slice_sample(species_data, n = round_count)
+
     state$started <- TRUE
     state$finished <- FALSE
     state$viewing_leaderboard <- FALSE
     state$username <- username
     state$score <- 0L
     state$current_index <- 1L
+    state$questions <- questions
+    state$current_choices <- build_round_choices(questions[1, , drop = FALSE])
     state$feedback <- NULL
     state$leaderboard <- NULL
     state$score_saved <- FALSE
-    state$questions <- dplyr::slice_sample(species_data, n = round_count)
-    reset_round_input()
+    reset_round_input(state$current_choices)
   }
 
   finish_game <- function() {
@@ -316,7 +349,7 @@ server <- function(input, output, session) {
     guess <- normalize_answer(input_value(input$guess))
 
     if (!nzchar(guess)) {
-      showNotification("Digite o nome de uma ave antes de enviar seu palpite.", type = "warning")
+      showNotification("Selecione uma das 4 opções antes de enviar sua resposta.", type = "warning")
       return()
     }
 
@@ -341,7 +374,8 @@ server <- function(input, output, session) {
       finish_game()
     } else {
       state$current_index <- state$current_index + 1L
-      reset_round_input()
+      state$current_choices <- build_round_choices(current_species())
+      reset_round_input(state$current_choices)
     }
   })
 
@@ -399,8 +433,19 @@ server <- function(input, output, session) {
               style = "margin: 18px 0;",
               tags$audio(src = species$audio_mp3[[1]], controls = NA, preload = "none", style = "width: 100%;")
             ),
-            textInput("guess", "Seu palpite", placeholder = "Digite o nome popular ou científico"),
-            actionButton("submit_guess", "Enviar palpite", class = "btn-warning")
+            radioButtons(
+              "guess",
+              "Escolha uma opção",
+              choiceNames = unname(lapply(seq_len(nrow(state$current_choices)), function(i) {
+                tags$span(
+                  state$current_choices$common_name[[i]],
+                  " ",
+                  tags$em(sprintf("(%s)", state$current_choices$scientific_name[[i]]))
+                )
+              })),
+              choiceValues = unname(as.character(state$current_choices$common_name_norm))
+            ),
+            actionButton("submit_guess", "Enviar resposta", class = "btn-warning")
           )
         )
       )
