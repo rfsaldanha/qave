@@ -6,9 +6,11 @@ library(DBI)
 library(RSQLite)
 library(stringi)
 
+# Game setup shared across the app.
 round_count <- 10L
 db_path <- "leaderboard.sqlite"
 
+# Normalize user guesses and species names so matching is accent- and case-insensitive.
 normalize_answer <- function(value) {
   normalized <- trimws(value)
   normalized <- stringi::stri_trans_general(normalized, "Latin-ASCII")
@@ -18,7 +20,9 @@ normalize_answer <- function(value) {
   trimws(normalized)
 }
 
+# Choose one usable photo URL from the list available for a species.
 sample_species_photo <- function(photo_urls) {
+  # Each round uses a single randomly chosen photo from the species gallery.
   valid_photos <- photo_urls[!is.na(photo_urls) & nzchar(photo_urls)]
 
   if (length(valid_photos) == 0) {
@@ -28,6 +32,7 @@ sample_species_photo <- function(photo_urls) {
   sample(valid_photos, size = 1)
 }
 
+# Load the WikiAves dataset and keep only rows that can be used in the game.
 load_species_data <- function(path = "wikiaves_species_rj.parquet") {
   species <- arrow::read_parquet(path) |>
     as.data.frame() |>
@@ -41,6 +46,7 @@ load_species_data <- function(path = "wikiaves_species_rj.parquet") {
       lengths(photo_urls) > 0
     ) |>
     dplyr::mutate(
+      # Keep only usable media URLs and precompute one display photo per species.
       photo_urls = lapply(photo_urls, function(urls) urls[!is.na(urls) & nzchar(urls)]),
       round_photo = vapply(photo_urls, sample_species_photo, character(1)),
       common_name_norm = vapply(common_name, normalize_answer, character(1)),
@@ -56,6 +62,7 @@ load_species_data <- function(path = "wikiaves_species_rj.parquet") {
   species
 }
 
+# Create the local SQLite tables used to store scores and leaderboard totals.
 init_db <- function(path = db_path) {
   conn <- DBI::dbConnect(RSQLite::SQLite(), path)
   on.exit(DBI::dbDisconnect(conn), add = TRUE)
@@ -88,6 +95,7 @@ init_db <- function(path = db_path) {
   )
 }
 
+# Save one finished game and update the aggregate leaderboard for the same user.
 record_score <- function(username, score, rounds = round_count, path = db_path) {
   conn <- DBI::dbConnect(RSQLite::SQLite(), path)
   on.exit(DBI::dbDisconnect(conn), add = TRUE)
@@ -116,6 +124,7 @@ record_score <- function(username, score, rounds = round_count, path = db_path) 
   )
 }
 
+# Read the top scores shown on the start screen and after a game ends.
 read_leaderboard <- function(limit = 10L, path = db_path) {
   conn <- DBI::dbConnect(RSQLite::SQLite(), path)
   on.exit(DBI::dbDisconnect(conn), add = TRUE)
@@ -132,9 +141,11 @@ read_leaderboard <- function(limit = 10L, path = db_path) {
   )
 }
 
+# Load game data and ensure the score database exists before the app starts.
 species_data <- load_species_data()
 init_db()
 
+# Define the visual theme used by the Shiny app.
 app_theme <- bs_theme(
   version = 5,
   bootswatch = "flatly",
@@ -146,9 +157,11 @@ app_theme <- bs_theme(
   heading_font = font_google("Bree Serif")
 )
 
+# Build the static page shell; the main content area is filled reactively by the server.
 ui <- page_fluid(
   theme = app_theme,
   tags$head(
+    # Custom CSS gives the game a card-based layout and bird-focused styling.
     tags$style(HTML("
       body {
         background:
@@ -251,6 +264,7 @@ ui <- page_fluid(
 )
 
 server <- function(input, output, session) {
+  # Keep all mutable game state in one reactive object.
   state <- reactiveValues(
     started = FALSE,
     finished = FALSE,
@@ -265,6 +279,7 @@ server <- function(input, output, session) {
     score_saved = FALSE
   )
 
+  # Render the latest answer feedback with a short description and external link.
   feedback_ui <- function(feedback) {
     if (is.null(feedback)) {
       return(NULL)
@@ -283,11 +298,13 @@ server <- function(input, output, session) {
     )
   }
 
+  # Return the species row for the current round.
   current_species <- reactive({
     req(state$started, !state$finished, !is.null(state$questions))
     state$questions[state$current_index, , drop = FALSE]
   })
 
+  # Build four answer choices: the correct species plus three random distractors.
   build_round_choices <- function(species_row) {
     correct_option <- species_row$common_name[[1]]
     distractors <- species_data |>
@@ -302,6 +319,7 @@ server <- function(input, output, session) {
       dplyr::slice_sample(n = 4L)
   }
 
+  # Refresh the radio button choices and clear any previous selection.
   reset_round_input <- function(choices = character(0)) {
     choice_names <- unname(lapply(seq_len(nrow(choices)), function(i) {
       tags$span(
@@ -321,6 +339,7 @@ server <- function(input, output, session) {
     )
   }
 
+  # Treat missing Shiny inputs as empty strings to simplify validation.
   input_value <- function(value) {
     if (is.null(value)) {
       ""
@@ -329,9 +348,11 @@ server <- function(input, output, session) {
     }
   }
 
+  # Start or restart a game by sampling the round species and resetting state.
   start_game <- function(username) {
     questions <- dplyr::slice_sample(species_data, n = round_count) |>
       dplyr::mutate(
+        # Resample the displayed image so a species can appear with a different photo in a new game.
         round_photo = vapply(photo_urls, sample_species_photo, character(1))
       )
 
@@ -349,6 +370,7 @@ server <- function(input, output, session) {
     reset_round_input(state$current_choices)
   }
 
+  # Persist the final score once and mark the session as finished.
   finish_game <- function() {
     if (!state$score_saved) {
       record_score(state$username, state$score, round_count)
@@ -359,6 +381,7 @@ server <- function(input, output, session) {
     state$finished <- TRUE
   }
 
+  # Start the game only after the player provides a username.
   observeEvent(input$start_game, {
     username <- trimws(input_value(input$username))
 
@@ -370,15 +393,18 @@ server <- function(input, output, session) {
     start_game(username)
   })
 
+  # Open the leaderboard view from the start screen.
   observeEvent(input$show_leaderboard, {
     state$viewing_leaderboard <- TRUE
     state$leaderboard <- read_leaderboard(10L)
   })
 
+  # Return from the leaderboard view to the initial screen.
   observeEvent(input$back_to_start, {
     state$viewing_leaderboard <- FALSE
   })
 
+  # Evaluate the selected answer, show the reveal text, and advance the game.
   observeEvent(input$submit_guess, {
     guess <- normalize_answer(input_value(input$guess))
 
@@ -396,6 +422,7 @@ server <- function(input, output, session) {
       state$feedback <- list(
         class = "ok",
         title = sprintf("Acertou! Era %s (%s).", species$common_name[[1]], species$scientific_name[[1]]),
+        # Show the short description in-app and keep the full WikiAves page one click away.
         description = species$brief_description[[1]],
         link = species$wiki_url[[1]]
       )
@@ -417,10 +444,12 @@ server <- function(input, output, session) {
     }
   })
 
+  # Replay the game for the same user after a finished round set.
   observeEvent(input$play_again, {
     start_game(state$username)
   })
 
+  # Swap between the start screen, the active round UI, and the final score view.
   output$app_body <- renderUI({
     if (!state$started) {
       if (state$viewing_leaderboard) {
@@ -457,6 +486,7 @@ server <- function(input, output, session) {
         tagList(
           div(
             class = "panel-card",
+            # Show status, the selected media, and the answer options for this round.
             div(
               class = "status-strip",
               span(progress_label),
@@ -499,6 +529,7 @@ server <- function(input, output, session) {
     )
   })
 
+  # Render the leaderboard table with localized column labels.
   output$leaderboard_table <- renderTable({
     req((state$finished || state$viewing_leaderboard), !is.null(state$leaderboard))
 
@@ -508,4 +539,5 @@ server <- function(input, output, session) {
   }, striped = TRUE, hover = TRUE, bordered = FALSE, spacing = "m")
 }
 
+# Launch the Shiny application.
 shinyApp(ui, server)
