@@ -32,10 +32,34 @@ sample_species_photo <- function(photo_urls) {
   sample(valid_photos, size = 1)
 }
 
-# Load the WikiAves dataset and keep only rows that can be used in the game.
-load_species_data <- function(path = "wikiaves_species_rj.parquet") {
+# Return an existing column or an NA vector when the source column is absent.
+column_or_na <- function(data, column) {
+  if (column %in% names(data)) {
+    data[[column]]
+  } else {
+    rep(NA_character_, nrow(data))
+  }
+}
+
+# Load the species dataset and normalize source-specific column names for the app.
+load_species_data <- function(path = "inaturalist_birds_rj.parquet") {
   species <- arrow::read_parquet(path) |>
-    as.data.frame() |>
+    as.data.frame()
+
+  species$audio_url <- dplyr::coalesce(
+    column_or_na(species, "audio_url"),
+    column_or_na(species, "sound_url")
+  )
+  species$brief_description <- dplyr::coalesce(
+    column_or_na(species, "brief_description"),
+    column_or_na(species, "description_paragraph")
+  )
+  species$wiki_url <- dplyr::coalesce(
+    column_or_na(species, "wiki_url"),
+    column_or_na(species, "description_url")
+  )
+
+  species <- species |>
     dplyr::filter(
       !is.na(common_name),
       !is.na(scientific_name),
@@ -274,7 +298,7 @@ ui <- page_fluid(
       ),
       p(
         class = "credits",
-        "Créditos de nomes, definições, imagens e sons: WikiAves."
+        "Créditos: imagens e sons do iNaturalist; descrições e links de referência da Wikipedia quando disponíveis."
       )
     ),
     uiOutput("app_body")
