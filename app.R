@@ -255,10 +255,44 @@ ui <- page_fluid(
         background: rgba(31,111,80,0.05);
       }
       .feedback {
+        display: flex;
+        align-items: flex-start;
+        gap: 16px;
         padding: 14px 16px;
         border-radius: 14px;
         margin-bottom: 16px;
         font-weight: 600;
+      }
+      .feedback-media {
+        width: 140px;
+        flex: 0 0 140px;
+      }
+      .feedback-photo {
+        width: 100%;
+        border-radius: 14px;
+        object-fit: cover;
+        aspect-ratio: 1 / 1;
+        border: 2px solid rgba(31,111,80,0.12);
+        background: rgba(31,111,80,0.05);
+      }
+      .feedback-content {
+        min-width: 0;
+        flex: 1 1 auto;
+      }
+      .feedback-content p {
+        margin: 8px 0 0;
+      }
+      @media (max-width: 640px) {
+        .feedback {
+          flex-direction: column;
+        }
+        .feedback-media {
+          width: 100%;
+          flex-basis: auto;
+        }
+        .feedback-photo {
+          max-width: 220px;
+        }
       }
       .feedback.ok {
         background: rgba(31,111,80,0.12);
@@ -338,13 +372,24 @@ server <- function(input, output, session) {
 
     div(
       class = paste("feedback", feedback$class),
-      tags$strong(feedback$title),
-      tags$p(style = "margin: 8px 0 0;", feedback$description),
-      tags$a(
-        href = feedback$link,
-        target = "_blank",
-        rel = "noopener noreferrer",
-        "Ver descrição completa na WikiPedia"
+      div(
+        class = "feedback-media",
+        tags$img(
+          class = "feedback-photo",
+          src = feedback$photo,
+          alt = feedback$title
+        )
+      ),
+      div(
+        class = "feedback-content",
+        tags$strong(feedback$title),
+        tags$p(feedback$description),
+        tags$a(
+          href = feedback$link,
+          target = "_blank",
+          rel = "noopener noreferrer",
+          "Ver descrição completa na Wikipedia"
+        )
       )
     )
   }
@@ -538,7 +583,8 @@ server <- function(input, output, session) {
         ),
         # Show the short description in-app and keep the full description page one click away.
         description = species$brief_description[[1]],
-        link = species$wiki_url[[1]]
+        link = species$wiki_url[[1]],
+        photo = species$round_photo[[1]]
       )
     } else {
       state$feedback <- list(
@@ -549,7 +595,8 @@ server <- function(input, output, session) {
           species$scientific_name[[1]]
         ),
         description = species$brief_description[[1]],
-        link = species$wiki_url[[1]]
+        link = species$wiki_url[[1]],
+        photo = species$round_photo[[1]]
       )
     }
 
