@@ -42,6 +42,18 @@ column_or_na <- function(data, column) {
   }
 }
 
+# Normalize optional text fields so the UI can rely on a consistent fallback.
+value_or_default <- function(value, default) {
+  ifelse(!is.na(value) & nzchar(trimws(value)), trimws(value), default)
+}
+
+# Open a short-lived SQLite connection for one operation.
+with_db_connection <- function(path = db_path, fn) {
+  conn <- DBI::dbConnect(RSQLite::SQLite(), path)
+  on.exit(DBI::dbDisconnect(conn), add = TRUE)
+  fn(conn)
+}
+
 # Load the species dataset and normalize source-specific column names for the app.
 load_species_data <- function(path = "inaturalist_birds_rj.parquet") {
   species <- arrow::read_parquet(path) |>
@@ -81,6 +93,15 @@ load_species_data <- function(path = "inaturalist_birds_rj.parquet") {
         urls[!is.na(urls) & nzchar(urls)]
       }),
       round_photo = vapply(photo_urls, sample_species_photo, character(1)),
+      brief_description = value_or_default(
+        brief_description,
+        "Sem descrição breve disponível para esta espécie."
+      ),
+      wiki_url = ifelse(
+        !is.na(wiki_url) & nzchar(trimws(wiki_url)),
+        trimws(wiki_url),
+        NA_character_
+      ),
       common_name_norm = vapply(common_name, normalize_answer, character(1)),
       scientific_name_norm = vapply(
         scientific_name,
@@ -100,35 +121,34 @@ load_species_data <- function(path = "inaturalist_birds_rj.parquet") {
 
 # Create the local SQLite tables used to store scores and leaderboard totals.
 init_db <- function(path = db_path) {
-  conn <- DBI::dbConnect(RSQLite::SQLite(), path)
-  on.exit(DBI::dbDisconnect(conn), add = TRUE)
-
-  DBI::dbExecute(
-    conn,
-    paste(
-      "CREATE TABLE IF NOT EXISTS game_results (",
-      "id INTEGER PRIMARY KEY AUTOINCREMENT,",
-      "username TEXT NOT NULL,",
-      "score INTEGER NOT NULL,",
-      "rounds INTEGER NOT NULL,",
-      "played_at TEXT NOT NULL",
-      ")"
+  with_db_connection(path, function(conn) {
+    DBI::dbExecute(
+      conn,
+      paste(
+        "CREATE TABLE IF NOT EXISTS game_results (",
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "username TEXT NOT NULL,",
+        "score INTEGER NOT NULL,",
+        "rounds INTEGER NOT NULL,",
+        "played_at TEXT NOT NULL",
+        ")"
+      )
     )
-  )
 
-  DBI::dbExecute(
-    conn,
-    paste(
-      "CREATE TABLE IF NOT EXISTS leaderboard (",
-      "username TEXT PRIMARY KEY,",
-      "total_score INTEGER NOT NULL DEFAULT 0,",
-      "games_played INTEGER NOT NULL DEFAULT 0,",
-      "best_score INTEGER NOT NULL DEFAULT 0,",
-      "last_score INTEGER NOT NULL DEFAULT 0,",
-      "last_played_at TEXT NOT NULL",
-      ")"
+    DBI::dbExecute(
+      conn,
+      paste(
+        "CREATE TABLE IF NOT EXISTS leaderboard (",
+        "username TEXT PRIMARY KEY,",
+        "total_score INTEGER NOT NULL DEFAULT 0,",
+        "games_played INTEGER NOT NULL DEFAULT 0,",
+        "best_score INTEGER NOT NULL DEFAULT 0,",
+        "last_score INTEGER NOT NULL DEFAULT 0,",
+        "last_played_at TEXT NOT NULL",
+        ")"
+      )
     )
-  )
+  })
 }
 
 # Save one finished game and update the aggregate leaderboard for the same user.
@@ -138,48 +158,46 @@ record_score <- function(
   rounds = round_count,
   path = db_path
 ) {
-  conn <- DBI::dbConnect(RSQLite::SQLite(), path)
-  on.exit(DBI::dbDisconnect(conn), add = TRUE)
-
   played_at <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
 
-  DBI::dbExecute(
-    conn,
-    "INSERT INTO game_results (username, score, rounds, played_at) VALUES (?, ?, ?, ?)",
-    params = list(username, score, rounds, played_at)
-  )
+  with_db_connection(path, function(conn) {
+    DBI::dbExecute(
+      conn,
+      "INSERT INTO game_results (username, score, rounds, played_at) VALUES (?, ?, ?, ?)",
+      params = list(username, score, rounds, played_at)
+    )
 
-  DBI::dbExecute(
-    conn,
-    paste(
-      "INSERT INTO leaderboard (username, total_score, games_played, best_score, last_score, last_played_at)",
-      "VALUES (?, ?, 1, ?, ?, ?)",
-      "ON CONFLICT(username) DO UPDATE SET",
-      "total_score = leaderboard.total_score + excluded.total_score,",
-      "games_played = leaderboard.games_played + 1,",
-      "best_score = MAX(leaderboard.best_score, excluded.best_score),",
-      "last_score = excluded.last_score,",
-      "last_played_at = excluded.last_played_at"
-    ),
-    params = list(username, score, score, score, played_at)
-  )
+    DBI::dbExecute(
+      conn,
+      paste(
+        "INSERT INTO leaderboard (username, total_score, games_played, best_score, last_score, last_played_at)",
+        "VALUES (?, ?, 1, ?, ?, ?)",
+        "ON CONFLICT(username) DO UPDATE SET",
+        "total_score = leaderboard.total_score + excluded.total_score,",
+        "games_played = leaderboard.games_played + 1,",
+        "best_score = MAX(leaderboard.best_score, excluded.best_score),",
+        "last_score = excluded.last_score,",
+        "last_played_at = excluded.last_played_at"
+      ),
+      params = list(username, score, score, score, played_at)
+    )
+  })
 }
 
 # Read the top scores shown on the start screen and after a game ends.
 read_leaderboard <- function(limit = 10L, path = db_path) {
-  conn <- DBI::dbConnect(RSQLite::SQLite(), path)
-  on.exit(DBI::dbDisconnect(conn), add = TRUE)
-
-  DBI::dbGetQuery(
-    conn,
-    paste(
-      "SELECT username, total_score, games_played, best_score, last_score, last_played_at",
-      "FROM leaderboard",
-      "ORDER BY total_score DESC, best_score DESC, last_played_at DESC",
-      "LIMIT ?"
-    ),
-    params = list(limit)
-  )
+  with_db_connection(path, function(conn) {
+    DBI::dbGetQuery(
+      conn,
+      paste(
+        "SELECT username, total_score, games_played, best_score, last_score, last_played_at",
+        "FROM leaderboard",
+        "ORDER BY total_score DESC, best_score DESC, last_played_at DESC",
+        "LIMIT ?"
+      ),
+      params = list(limit)
+    )
+  })
 }
 
 # Load game data and ensure the score database exists before the app starts.
@@ -370,6 +388,20 @@ server <- function(input, output, session) {
       return(NULL)
     }
 
+    feedback_details <- list(
+      tags$strong(feedback$title),
+      tags$p(feedback$description)
+    )
+
+    if (!isTRUE(is.na(feedback$link))) {
+      feedback_details[[length(feedback_details) + 1L]] <- tags$a(
+        href = feedback$link,
+        target = "_blank",
+        rel = "noopener noreferrer",
+        "Ver descrição completa na Wikipedia"
+      )
+    }
+
     div(
       class = paste("feedback", feedback$class),
       div(
@@ -382,14 +414,7 @@ server <- function(input, output, session) {
       ),
       div(
         class = "feedback-content",
-        tags$strong(feedback$title),
-        tags$p(feedback$description),
-        tags$a(
-          href = feedback$link,
-          target = "_blank",
-          rel = "noopener noreferrer",
-          "Ver descrição completa na Wikipedia"
-        )
+        feedback_details
       )
     )
   }
@@ -414,40 +439,54 @@ server <- function(input, output, session) {
 
   # Build four answer choices: the correct species plus three random distractors.
   build_round_choices <- function(species_row, available_species) {
-    correct_option <- species_row$common_name[[1]]
-    distractors <- available_species |>
-      dplyr::filter(common_name != correct_option) |>
+    distractor_pool <- available_species |>
+      dplyr::filter(scientific_name != species_row$scientific_name[[1]])
+
+    if (nrow(distractor_pool) < 3L) {
+      stop("Not enough distractor species available to build the round.")
+    }
+
+    distractors <- distractor_pool |>
       dplyr::slice_sample(n = 3L) |>
-      dplyr::select(common_name, scientific_name, common_name_norm)
+      dplyr::select(
+        common_name,
+        scientific_name,
+        common_name_norm,
+        scientific_name_norm
+      )
 
     dplyr::bind_rows(
       dplyr::select(
         species_row,
         common_name,
         scientific_name,
-        common_name_norm
+        common_name_norm,
+        scientific_name_norm
       ),
       distractors
     ) |>
-      dplyr::slice_sample(n = 4L)
+      dplyr::slice_sample(n = 4L) |>
+      dplyr::mutate(choice_id = sprintf("choice_%d", dplyr::row_number()))
   }
 
-  # Refresh the radio button choices and clear any previous selection.
-  reset_round_input <- function(choices = character(0)) {
-    choice_names <- unname(lapply(seq_len(nrow(choices)), function(i) {
+  # Build radio button labels once so update and initial render share the same markup.
+  build_choice_names <- function(choices) {
+    unname(lapply(seq_len(nrow(choices)), function(i) {
       tags$span(
         choices$common_name[[i]],
         " ",
         tags$em(sprintf("(%s)", choices$scientific_name[[i]]))
       )
     }))
-    choice_values <- unname(as.character(choices$common_name_norm))
+  }
 
+  # Refresh the radio button choices and clear any previous selection.
+  reset_round_input <- function(choices = character(0)) {
     updateRadioButtons(
       session,
       "guess",
-      choiceNames = choice_names,
-      choiceValues = choice_values,
+      choiceNames = build_choice_names(choices),
+      choiceValues = unname(as.character(choices$choice_id)),
       selected = character(0)
     )
   }
@@ -555,7 +594,7 @@ server <- function(input, output, session) {
 
   # Evaluate the selected answer, show the reveal text, and advance the game.
   observeEvent(input$submit_guess, {
-    guess <- normalize_answer(input_value(input$guess))
+    guess <- input_value(input$guess)
 
     if (!nzchar(guess)) {
       showNotification(
@@ -566,11 +605,13 @@ server <- function(input, output, session) {
     }
 
     species <- current_species()
-    accepted <- c(
-      species$common_name_norm[[1]],
-      species$scientific_name_norm[[1]]
-    )
-    matched <- guess %in% accepted
+    selected_choice <- state$current_choices |>
+      dplyr::filter(choice_id == guess)
+    matched <- nrow(selected_choice) == 1L &&
+      identical(
+        selected_choice$scientific_name_norm[[1]],
+        species$scientific_name_norm[[1]]
+      )
 
     if (matched) {
       state$score <- state$score + 1L
@@ -709,22 +750,8 @@ server <- function(input, output, session) {
             radioButtons(
               "guess",
               "Escolha uma opção",
-              choiceNames = unname(lapply(
-                seq_len(nrow(state$current_choices)),
-                function(i) {
-                  tags$span(
-                    state$current_choices$common_name[[i]],
-                    " ",
-                    tags$em(sprintf(
-                      "(%s)",
-                      state$current_choices$scientific_name[[i]]
-                    ))
-                  )
-                }
-              )),
-              choiceValues = unname(as.character(
-                state$current_choices$common_name_norm
-              ))
+              choiceNames = build_choice_names(state$current_choices),
+              choiceValues = unname(as.character(state$current_choices$choice_id))
             ),
             actionButton(
               "submit_guess",
