@@ -1,5 +1,6 @@
 library(shiny)
 library(bslib)
+library(shinyWidgets)
 library(arrow)
 library(dplyr)
 library(DBI)
@@ -71,6 +72,11 @@ load_species_data <- function(path = "inaturalist_birds_rj.parquet") {
     ) |>
     dplyr::mutate(
       # Keep only usable media URLs and precompute one display photo per species.
+      family = dplyr::if_else(
+        !is.na(family) & nzchar(family),
+        family,
+        "Sem familia informada"
+      ),
       photo_urls = lapply(photo_urls, function(urls) {
         urls[!is.na(urls) & nzchar(urls)]
       }),
@@ -178,6 +184,7 @@ read_leaderboard <- function(limit = 10L, path = db_path) {
 
 # Load game data and ensure the score database exists before the app starts.
 species_data <- load_species_data()
+family_choices <- sort(unique(species_data$family))
 init_db()
 
 # Define the visual theme used by the Shiny app.
@@ -294,7 +301,7 @@ ui <- page_fluid(
       class = "hero",
       h1("Que ave é essa?"),
       p(
-        "Tente identificar aves observadas no estado do Rio de Janeiro usando a foto e a vocalização. Vale tanto o nome popular quanto o nome científico."
+        "Tente identificar aves observadas no estado do Rio de Janeiro usando a foto e a vocalização."
       ),
       p(
         class = "credits",
@@ -315,6 +322,8 @@ server <- function(input, output, session) {
     score = 0L,
     current_index = 1L,
     questions = NULL,
+    available_species = NULL,
+    selected_families = family_choices,
     current_choices = NULL,
     feedback = NULL,
     leaderboard = NULL,
@@ -335,7 +344,7 @@ server <- function(input, output, session) {
         href = feedback$link,
         target = "_blank",
         rel = "noopener noreferrer",
-        "Ver descrição completa no WikiAves"
+        "Ver descrição completa na WikiPedia"
       )
     )
   }
@@ -346,10 +355,22 @@ server <- function(input, output, session) {
     state$questions[state$current_index, , drop = FALSE]
   })
 
+  # Restrict the game pool to the families chosen on the start screen.
+  species_pool <- function(selected_families) {
+    selected_families <- selected_families[!is.na(selected_families)]
+
+    if (length(selected_families) == 0) {
+      return(species_data[0, , drop = FALSE])
+    }
+
+    species_data |>
+      dplyr::filter(family %in% selected_families)
+  }
+
   # Build four answer choices: the correct species plus three random distractors.
-  build_round_choices <- function(species_row) {
+  build_round_choices <- function(species_row, available_species) {
     correct_option <- species_row$common_name[[1]]
-    distractors <- species_data |>
+    distractors <- available_species |>
       dplyr::filter(common_name != correct_option) |>
       dplyr::slice_sample(n = 3L) |>
       dplyr::select(common_name, scientific_name, common_name_norm)
@@ -396,8 +417,30 @@ server <- function(input, output, session) {
   }
 
   # Start or restart a game by sampling the round species and resetting state.
-  start_game <- function(username) {
-    questions <- dplyr::slice_sample(species_data, n = round_count) |>
+  start_game <- function(username, selected_families) {
+    available_species <- species_pool(selected_families)
+
+    if (length(selected_families) == 0) {
+      showNotification(
+        "Selecione pelo menos uma familia antes de começar.",
+        type = "error"
+      )
+      return(invisible(FALSE))
+    }
+
+    if (nrow(available_species) < round_count) {
+      showNotification(
+        sprintf(
+          "As familias selecionadas têm apenas %d aves com foto e som. Escolha pelo menos %d.",
+          nrow(available_species),
+          round_count
+        ),
+        type = "error"
+      )
+      return(invisible(FALSE))
+    }
+
+    questions <- dplyr::slice_sample(available_species, n = round_count) |>
       dplyr::mutate(
         # Resample the displayed image so a species can appear with a different photo in a new game.
         round_photo = vapply(photo_urls, sample_species_photo, character(1))
@@ -410,11 +453,17 @@ server <- function(input, output, session) {
     state$score <- 0L
     state$current_index <- 1L
     state$questions <- questions
-    state$current_choices <- build_round_choices(questions[1, , drop = FALSE])
+    state$available_species <- available_species
+    state$selected_families <- selected_families
+    state$current_choices <- build_round_choices(
+      questions[1, , drop = FALSE],
+      available_species
+    )
     state$feedback <- NULL
     state$leaderboard <- NULL
     state$score_saved <- FALSE
     reset_round_input(state$current_choices)
+    invisible(TRUE)
   }
 
   # Persist the final score once and mark the session as finished.
@@ -431,6 +480,11 @@ server <- function(input, output, session) {
   # Start the game only after the player provides a username.
   observeEvent(input$start_game, {
     username <- trimws(input_value(input$username))
+    selected_families <- if (is.null(input$family_filter)) {
+      character(0)
+    } else {
+      input$family_filter
+    }
 
     if (!nzchar(username)) {
       showNotification(
@@ -440,7 +494,7 @@ server <- function(input, output, session) {
       return()
     }
 
-    start_game(username)
+    start_game(username, selected_families)
   })
 
   # Open the leaderboard view from the start screen.
@@ -482,7 +536,7 @@ server <- function(input, output, session) {
           species$common_name[[1]],
           species$scientific_name[[1]]
         ),
-        # Show the short description in-app and keep the full WikiAves page one click away.
+        # Show the short description in-app and keep the full description page one click away.
         description = species$brief_description[[1]],
         link = species$wiki_url[[1]]
       )
@@ -503,14 +557,17 @@ server <- function(input, output, session) {
       finish_game()
     } else {
       state$current_index <- state$current_index + 1L
-      state$current_choices <- build_round_choices(current_species())
+      state$current_choices <- build_round_choices(
+        current_species(),
+        state$available_species
+      )
       reset_round_input(state$current_choices)
     }
   })
 
   # Replay the game for the same user after a finished round set.
   observeEvent(input$play_again, {
-    start_game(state$username)
+    start_game(state$username, state$selected_families)
   })
 
   # Swap between the start screen, the active round UI, and the final score view.
@@ -536,6 +593,30 @@ server <- function(input, output, session) {
             "Escolha um nome de usuário e tente identificar 10 aves sorteadas aleatoriamente."
           ),
           textInput("username", "Nome de usuário"),
+          shinyWidgets::pickerInput(
+            "family_filter",
+            "Famílias",
+            choices = family_choices,
+            selected = family_choices,
+            multiple = TRUE,
+            options = shinyWidgets::pickerOptions(
+              `actions-box` = TRUE,
+              `deselect-all-text` = "Limpar",
+              `live-search` = TRUE,
+              `live-search-placeholder` = "Buscar família",
+              `none-selected-text` = "Selecione uma ou mais famílias",
+              `select-all-text` = "Selecionar todas",
+              `selected-text-format` = "count > 4",
+              size = 10
+            )
+          ),
+          p(
+            class = "credits",
+            sprintf(
+              "Todas as %d famílias disponíveis já vêm selecionadas por padrão.",
+              length(family_choices)
+            )
+          ),
           actionButton("start_game", "Começar a jogar", class = "btn-success"),
           div(style = "margin-top: 12px;"),
           actionButton("show_leaderboard", "Ver ranking", class = "btn-warning")
