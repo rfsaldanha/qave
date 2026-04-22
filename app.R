@@ -176,7 +176,12 @@ normalize_photo_url <- function(url) {
     return(NA_character_)
   }
 
-  sub("([/_])large(?=\\.[A-Za-z0-9]+(?:\\?|$)|\\?|$)", "\\1medium", normalized_url, perl = TRUE)
+  sub(
+    "([/_])large(?=\\.[A-Za-z0-9]+(?:\\?|$)|\\?|$)",
+    "\\1medium",
+    normalized_url,
+    perl = TRUE
+  )
 }
 
 # Return an existing column or an NA vector when the source column is absent.
@@ -252,12 +257,18 @@ leaderboard_cache_is_fresh <- function(limit) {
   !is.null(leaderboard_cache) &&
     !is.na(leaderboard_cache_loaded_at) &&
     nrow(leaderboard_cache) >= limit &&
-    as.numeric(difftime(Sys.time(), leaderboard_cache_loaded_at, units = "secs")) <
+    as.numeric(difftime(
+      Sys.time(),
+      leaderboard_cache_loaded_at,
+      units = "secs"
+    )) <
       leaderboard_cache_ttl_secs
 }
 
 # Discover the parquet files available for each Brazilian state.
-list_state_files <- function(pattern = "^inaturalist_birds_([a-z]{2})\\.parquet$") {
+list_state_files <- function(
+  pattern = "^inaturalist_birds_([a-z]{2})\\.parquet$"
+) {
   parquet_files <- list.files(
     path = ".",
     pattern = pattern,
@@ -366,44 +377,47 @@ load_species_data <- function(state_files = list_state_files()) {
 
 # Create the Postgres tables used to store scores and leaderboard totals.
 init_db <- function(config = db_config) {
-  with_db_connection(function(conn) {
-    DBI::dbExecute(conn, "SET client_min_messages TO warning")
+  with_db_connection(
+    function(conn) {
+      DBI::dbExecute(conn, "SET client_min_messages TO warning")
 
-    DBI::dbExecute(
-      conn,
-      paste(
-        "CREATE TABLE IF NOT EXISTS game_results (",
-        "id BIGSERIAL PRIMARY KEY,",
-        "username TEXT NOT NULL,",
-        "score INTEGER NOT NULL,",
-        "rounds INTEGER NOT NULL,",
-        "played_at TIMESTAMPTZ NOT NULL",
-        ")"
+      DBI::dbExecute(
+        conn,
+        paste(
+          "CREATE TABLE IF NOT EXISTS game_results (",
+          "id BIGSERIAL PRIMARY KEY,",
+          "username TEXT NOT NULL,",
+          "score INTEGER NOT NULL,",
+          "rounds INTEGER NOT NULL,",
+          "played_at TIMESTAMPTZ NOT NULL",
+          ")"
+        )
       )
-    )
 
-    DBI::dbExecute(
-      conn,
-      paste(
-        "CREATE TABLE IF NOT EXISTS leaderboard (",
-        "username TEXT PRIMARY KEY,",
-        "total_score INTEGER NOT NULL DEFAULT 0,",
-        "games_played INTEGER NOT NULL DEFAULT 0,",
-        "best_score INTEGER NOT NULL DEFAULT 0,",
-        "last_score INTEGER NOT NULL DEFAULT 0,",
-        "last_played_at TIMESTAMPTZ NOT NULL",
-        ")"
+      DBI::dbExecute(
+        conn,
+        paste(
+          "CREATE TABLE IF NOT EXISTS leaderboard (",
+          "username TEXT PRIMARY KEY,",
+          "total_score INTEGER NOT NULL DEFAULT 0,",
+          "games_played INTEGER NOT NULL DEFAULT 0,",
+          "best_score INTEGER NOT NULL DEFAULT 0,",
+          "last_score INTEGER NOT NULL DEFAULT 0,",
+          "last_played_at TIMESTAMPTZ NOT NULL",
+          ")"
+        )
       )
-    )
 
-    DBI::dbExecute(
-      conn,
-      paste(
-        "CREATE INDEX IF NOT EXISTS leaderboard_rank_idx",
-        "ON leaderboard (total_score DESC, best_score DESC, last_played_at DESC)"
+      DBI::dbExecute(
+        conn,
+        paste(
+          "CREATE INDEX IF NOT EXISTS leaderboard_rank_idx",
+          "ON leaderboard (total_score DESC, best_score DESC, last_played_at DESC)"
+        )
       )
-    )
-  }, config = config)
+    },
+    config = config
+  )
 }
 
 # Save one finished game and update the aggregate leaderboard for the same user.
@@ -415,28 +429,31 @@ record_score <- function(
 ) {
   played_at <- Sys.time()
 
-  with_db_connection(function(conn) {
-    DBI::dbExecute(
-      conn,
-      "INSERT INTO game_results (username, score, rounds, played_at) VALUES ($1, $2, $3, $4)",
-      params = list(username, score, rounds, played_at)
-    )
+  with_db_connection(
+    function(conn) {
+      DBI::dbExecute(
+        conn,
+        "INSERT INTO game_results (username, score, rounds, played_at) VALUES ($1, $2, $3, $4)",
+        params = list(username, score, rounds, played_at)
+      )
 
-    DBI::dbExecute(
-      conn,
-      paste(
-        "INSERT INTO leaderboard (username, total_score, games_played, best_score, last_score, last_played_at)",
-        "VALUES ($1, $2, 1, $3, $4, $5)",
-        "ON CONFLICT(username) DO UPDATE SET",
-        "total_score = leaderboard.total_score + excluded.total_score,",
-        "games_played = leaderboard.games_played + 1,",
-        "best_score = GREATEST(leaderboard.best_score, excluded.best_score),",
-        "last_score = excluded.last_score,",
-        "last_played_at = excluded.last_played_at"
-      ),
-      params = list(username, score, score, score, played_at)
-    )
-  }, config = config)
+      DBI::dbExecute(
+        conn,
+        paste(
+          "INSERT INTO leaderboard (username, total_score, games_played, best_score, last_score, last_played_at)",
+          "VALUES ($1, $2, 1, $3, $4, $5)",
+          "ON CONFLICT(username) DO UPDATE SET",
+          "total_score = leaderboard.total_score + excluded.total_score,",
+          "games_played = leaderboard.games_played + 1,",
+          "best_score = GREATEST(leaderboard.best_score, excluded.best_score),",
+          "last_score = excluded.last_score,",
+          "last_played_at = excluded.last_played_at"
+        ),
+        params = list(username, score, score, score, played_at)
+      )
+    },
+    config = config
+  )
 }
 
 # Read the top scores shown on the start screen and after a game ends.
@@ -447,18 +464,21 @@ read_leaderboard <- function(limit = 10L, config = db_config, refresh = FALSE) {
     return(utils::head(leaderboard_cache, limit))
   }
 
-  leaderboard <- with_db_connection(function(conn) {
-    DBI::dbGetQuery(
-      conn,
-      paste(
-        "SELECT username, total_score, games_played, best_score, last_score, last_played_at",
-        "FROM leaderboard",
-        "ORDER BY total_score DESC, best_score DESC, last_played_at DESC",
-        "LIMIT $1"
-      ),
-      params = list(limit)
-    )
-  }, config = config)
+  leaderboard <- with_db_connection(
+    function(conn) {
+      DBI::dbGetQuery(
+        conn,
+        paste(
+          "SELECT username, total_score, games_played, best_score, last_score, last_played_at",
+          "FROM leaderboard",
+          "ORDER BY total_score DESC, best_score DESC, last_played_at DESC",
+          "LIMIT $1"
+        ),
+        params = list(limit)
+      )
+    },
+    config = config
+  )
 
   update_leaderboard_cache(leaderboard)
   leaderboard
@@ -492,10 +512,16 @@ ui <- page_fluid(
   theme = app_theme,
   tags$head(
     tags$meta(charset = "utf-8"),
-    tags$meta(name = "viewport", content = "width=device-width, initial-scale=1"),
+    tags$meta(
+      name = "viewport",
+      content = "width=device-width, initial-scale=1"
+    ),
     tags$meta(name = "description", content = app_description),
     tags$meta(name = "keywords", content = app_keywords),
-    tags$meta(name = "robots", content = "index,follow,max-image-preview:large"),
+    tags$meta(
+      name = "robots",
+      content = "index,follow,max-image-preview:large"
+    ),
     tags$link(rel = "canonical", href = app_base_url),
     tags$meta(property = "og:type", content = "website"),
     tags$meta(property = "og:locale", content = "pt_BR"),
@@ -508,7 +534,10 @@ ui <- page_fluid(
     tags$meta(name = "twitter:description", content = app_description),
     tags$script(HTML("document.documentElement.lang = 'pt-BR';")),
     tags$script(type = "application/ld+json", HTML(app_structured_data)),
-    tags$script(async = NA, src = "https://www.googletagmanager.com/gtag/js?id=G-JERY6P5EXE"),
+    tags$script(
+      async = NA,
+      src = "https://www.googletagmanager.com/gtag/js?id=G-JERY6P5EXE"
+    ),
     tags$script(HTML(
       "
       window.dataLayer = window.dataLayer || [];
@@ -684,20 +713,7 @@ ui <- page_fluid(
       class = "hero seo-copy",
       h1("Que ave é essa?"),
       p(
-        "Tente identificar aves observadas em um ou mais estados do Brasil usando a foto e, quando disponível, a vocalização."
-      ),
-      tags$h2("Quiz online para identificar aves do Brasil"),
-      tags$p(
-        "O Que ave é essa? é um quiz gratuito para identificar aves do Brasil por foto e, quando disponível, por vocalização. Antes de começar, você pode filtrar a partida por estado e por família."
-      ),
-      tags$p(
-        "O app usa imagens e sons de registros do iNaturalist e mostra uma breve descrição da espécie após cada resposta, quando esse conteúdo está disponível."
-      ),
-      tags$h3("Como funciona"),
-      tags$ul(
-        tags$li("Escolha um nome de usuário e selecione um ou mais estados."),
-        tags$li("Filtre o jogo pelas famílias de aves que você quer praticar."),
-        tags$li("Veja a foto da ave, ouça a vocalização quando houver e responda entre quatro opções.")
+        "Tente identificar aves observadas em um ou mais estados do Brasil com a foto e a vocalização."
       ),
       p(
         class = "credits",
@@ -743,30 +759,40 @@ server <- function(input, output, session) {
     )
   }
 
+  # Defer leaderboard work until the next loop tick so the UI can paint first.
   load_leaderboard_async <- function(limit = 10L, refresh = FALSE) {
     state$leaderboard_loading <- TRUE
     state$leaderboard <- NULL
 
-    later::later(function() {
-      shiny::withReactiveDomain(session, {
-        on.exit({
-          state$leaderboard_loading <- FALSE
-        }, add = TRUE)
+    later::later(
+      function() {
+        shiny::withReactiveDomain(session, {
+          on.exit(
+            {
+              state$leaderboard_loading <- FALSE
+            },
+            add = TRUE
+          )
 
-        leaderboard <- tryCatch(
-          read_leaderboard(limit, refresh = refresh),
-          error = function(err) {
-            showNotification(
-              sprintf("Nao foi possivel carregar o ranking: %s", conditionMessage(err)),
-              type = "error"
-            )
-            NULL
-          }
-        )
+          leaderboard <- tryCatch(
+            read_leaderboard(limit, refresh = refresh),
+            error = function(err) {
+              showNotification(
+                sprintf(
+                  "Nao foi possivel carregar o ranking: %s",
+                  conditionMessage(err)
+                ),
+                type = "error"
+              )
+              NULL
+            }
+          )
 
-        state$leaderboard <- leaderboard
-      })
-    }, delay = 0)
+          state$leaderboard <- leaderboard
+        })
+      },
+      delay = 0
+    )
   }
 
   # Render the latest answer feedback with a short description and external link.
@@ -844,7 +870,7 @@ server <- function(input, output, session) {
       dplyr::pull(family)
   }
 
-  # Build four answer choices: the correct species plus three random distractors.
+  # Build four answer choices with only the fields needed for labels and answer checks.
   build_round_choices <- function(species_row, available_species) {
     distractor_pool <- available_species |>
       dplyr::filter(scientific_name != species_row$scientific_name[[1]])
@@ -955,7 +981,7 @@ server <- function(input, output, session) {
     invisible(TRUE)
   }
 
-  # Persist the final score once and mark the session as finished.
+  # Show the finished state immediately, then persist the score once per game.
   finish_game <- function() {
     final_username <- isolate(state$username)
     final_score <- isolate(state$score)
@@ -970,33 +996,42 @@ server <- function(input, output, session) {
     state$leaderboard_loading <- TRUE
     state$leaderboard <- NULL
 
-    session$onFlushed(function() {
-      later::later(function() {
-        shiny::withReactiveDomain(session, {
-          on.exit({
-            state$score_save_pending <- FALSE
-          }, add = TRUE)
-
-          tryCatch(
-            {
-              record_score(final_username, final_score, round_count)
-              state$score_saved <- TRUE
-              load_leaderboard_async(10L, refresh = TRUE)
-            },
-            error = function(err) {
-              state$leaderboard_loading <- FALSE
-              showNotification(
-                sprintf(
-                  "Nao foi possivel salvar a pontuacao: %s",
-                  conditionMessage(err)
-                ),
-                type = "error"
+    session$onFlushed(
+      function() {
+        later::later(
+          function() {
+            shiny::withReactiveDomain(session, {
+              on.exit(
+                {
+                  state$score_save_pending <- FALSE
+                },
+                add = TRUE
               )
-            }
-          )
-        })
-      }, delay = 0)
-    }, once = TRUE)
+
+              tryCatch(
+                {
+                  record_score(final_username, final_score, round_count)
+                  state$score_saved <- TRUE
+                  load_leaderboard_async(10L, refresh = TRUE)
+                },
+                error = function(err) {
+                  state$leaderboard_loading <- FALSE
+                  showNotification(
+                    sprintf(
+                      "Nao foi possivel salvar a pontuacao: %s",
+                      conditionMessage(err)
+                    ),
+                    type = "error"
+                  )
+                }
+              )
+            })
+          },
+          delay = 0
+        )
+      },
+      once = TRUE
+    )
 
     invisible(NULL)
   }
@@ -1027,31 +1062,35 @@ server <- function(input, output, session) {
   })
 
   # Keep the family picker aligned with the states chosen on the start screen.
-  observeEvent(input$state_filter, {
-    selected_states <- if (is.null(input$state_filter)) {
-      character(0)
-    } else {
-      input$state_filter
-    }
-    available_families <- family_choices_for_states(selected_states)
-    current_selection <- if (is.null(input$family_filter)) {
-      character(0)
-    } else {
-      input$family_filter
-    }
-    retained_families <- intersect(current_selection, available_families)
+  observeEvent(
+    input$state_filter,
+    {
+      selected_states <- if (is.null(input$state_filter)) {
+        character(0)
+      } else {
+        input$state_filter
+      }
+      available_families <- family_choices_for_states(selected_states)
+      current_selection <- if (is.null(input$family_filter)) {
+        character(0)
+      } else {
+        input$family_filter
+      }
+      retained_families <- intersect(current_selection, available_families)
 
-    if (length(selected_states) > 0 && length(retained_families) == 0) {
-      retained_families <- available_families
-    }
+      if (length(selected_states) > 0 && length(retained_families) == 0) {
+        retained_families <- available_families
+      }
 
-    updatePickerInput(
-      session,
-      "family_filter",
-      choices = available_families,
-      selected = retained_families
-    )
-  }, ignoreInit = TRUE)
+      updatePickerInput(
+        session,
+        "family_filter",
+        choices = available_families,
+        selected = retained_families
+      )
+    },
+    ignoreInit = TRUE
+  )
 
   # Open the leaderboard view from the start screen.
   observeEvent(input$show_leaderboard, {
@@ -1269,7 +1308,9 @@ server <- function(input, output, session) {
               "guess",
               "Escolha uma opção",
               choiceNames = build_choice_names(state$current_choices),
-              choiceValues = unname(as.character(state$current_choices$choice_id))
+              choiceValues = unname(as.character(
+                state$current_choices$choice_id
+              ))
             ),
             actionButton(
               "submit_guess",
@@ -1314,8 +1355,14 @@ server <- function(input, output, session) {
       )
 
       leaderboard <- state$leaderboard
-      leaderboard$last_played_at <- if (inherits(leaderboard$last_played_at, "POSIXt")) {
-        format(leaderboard$last_played_at, "%d/%m/%Y %H:%M:%S", tz = "America/Sao_Paulo")
+      leaderboard$last_played_at <- if (
+        inherits(leaderboard$last_played_at, "POSIXt")
+      ) {
+        format(
+          leaderboard$last_played_at,
+          "%d/%m/%Y %H:%M:%S",
+          tz = "America/Sao_Paulo"
+        )
       } else {
         format(
           as.POSIXct(
