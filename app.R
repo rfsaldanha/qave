@@ -170,9 +170,13 @@ sample_species_photo <- function(photo_urls) {
 
 # Prefer the medium photo variant to reduce payload while keeping good quality.
 normalize_photo_url <- function(url) {
+  if (is.null(url) || length(url) == 0 || all(is.na(url))) {
+    return(NA_character_)
+  }
+
   normalized_url <- trimws(url)
 
-  if (!nzchar(normalized_url)) {
+  if (is.na(normalized_url) || !nzchar(normalized_url)) {
     return(NA_character_)
   }
 
@@ -332,6 +336,7 @@ load_state_species_data <- function(path, state_code, state_label) {
         normalized_urls <- vapply(urls, normalize_photo_url, character(1))
         normalized_urls[!is.na(normalized_urls) & nzchar(normalized_urls)]
       }),
+      has_photo = lengths(photo_urls) > 0,
       round_photo = vapply(photo_urls, sample_species_photo, character(1)),
       brief_description = value_or_default(
         brief_description,
@@ -356,7 +361,8 @@ load_state_species_data <- function(path, state_code, state_label) {
         character(1)
       )
     ) |>
-    dplyr::filter(!is.na(round_photo), nzchar(round_photo)) |>
+    dplyr::filter(has_photo, !is.na(round_photo), nzchar(round_photo)) |>
+    dplyr::select(-has_photo) |>
     dplyr::distinct(common_name, scientific_name, .keep_all = TRUE)
 
   species
