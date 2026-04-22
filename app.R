@@ -168,6 +168,17 @@ sample_species_photo <- function(photo_urls) {
   sample(valid_photos, size = 1)
 }
 
+# Prefer the medium photo variant to reduce payload while keeping good quality.
+normalize_photo_url <- function(url) {
+  normalized_url <- trimws(url)
+
+  if (!nzchar(normalized_url)) {
+    return(NA_character_)
+  }
+
+  sub("([/_])large(?=\\.[A-Za-z0-9]+(?:\\?|$)|\\?|$)", "\\1medium", normalized_url, perl = TRUE)
+}
+
 # Return an existing column or an NA vector when the source column is absent.
 column_or_na <- function(data, column) {
   if (column %in% names(data)) {
@@ -307,7 +318,8 @@ load_state_species_data <- function(path, state_code, state_label) {
         "Sem familia informada"
       ),
       photo_urls = lapply(photo_urls, function(urls) {
-        urls[!is.na(urls) & nzchar(urls)]
+        normalized_urls <- vapply(urls, normalize_photo_url, character(1))
+        normalized_urls[!is.na(normalized_urls) & nzchar(normalized_urls)]
       }),
       round_photo = vapply(photo_urls, sample_species_photo, character(1)),
       brief_description = value_or_default(
@@ -719,7 +731,8 @@ server <- function(input, output, session) {
     current_choices = NULL,
     feedback = NULL,
     leaderboard = NULL,
-    score_saved = FALSE
+    score_saved = FALSE,
+    score_save_pending = FALSE
   )
 
   leaderboard_loading_ui <- function(message = "Carregando ranking...") {
@@ -735,22 +748,24 @@ server <- function(input, output, session) {
     state$leaderboard <- NULL
 
     later::later(function() {
-      on.exit({
-        state$leaderboard_loading <- FALSE
-      }, add = TRUE)
+      shiny::withReactiveDomain(session, {
+        on.exit({
+          state$leaderboard_loading <- FALSE
+        }, add = TRUE)
 
-      leaderboard <- tryCatch(
-        read_leaderboard(limit, refresh = refresh),
-        error = function(err) {
-          showNotification(
-            sprintf("Nao foi possivel carregar o ranking: %s", conditionMessage(err)),
-            type = "error"
-          )
-          NULL
-        }
-      )
+        leaderboard <- tryCatch(
+          read_leaderboard(limit, refresh = refresh),
+          error = function(err) {
+            showNotification(
+              sprintf("Nao foi possivel carregar o ranking: %s", conditionMessage(err)),
+              type = "error"
+            )
+            NULL
+          }
+        )
 
-      state$leaderboard <- leaderboard
+        state$leaderboard <- leaderboard
+      })
     }, delay = 0)
   }
 
@@ -872,17 +887,6 @@ server <- function(input, output, session) {
     }))
   }
 
-  # Refresh the radio button choices and clear any previous selection.
-  reset_round_input <- function(choices = character(0)) {
-    updateRadioButtons(
-      session,
-      "guess",
-      choiceNames = build_choice_names(choices),
-      choiceValues = unname(as.character(choices$choice_id)),
-      selected = character(0)
-    )
-  }
-
   # Treat missing Shiny inputs as empty strings to simplify validation.
   input_value <- function(value) {
     if (is.null(value)) {
@@ -947,19 +951,54 @@ server <- function(input, output, session) {
     state$feedback <- NULL
     state$leaderboard <- NULL
     state$score_saved <- FALSE
-    reset_round_input(state$current_choices)
+    state$score_save_pending <- FALSE
     invisible(TRUE)
   }
 
   # Persist the final score once and mark the session as finished.
   finish_game <- function() {
-    if (!state$score_saved) {
-      record_score(state$username, state$score, round_count)
-      load_leaderboard_async(10L, refresh = TRUE)
-      state$score_saved <- TRUE
-    }
+    final_username <- isolate(state$username)
+    final_score <- isolate(state$score)
 
     state$finished <- TRUE
+
+    if (state$score_saved || state$score_save_pending) {
+      return(invisible(NULL))
+    }
+
+    state$score_save_pending <- TRUE
+    state$leaderboard_loading <- TRUE
+    state$leaderboard <- NULL
+
+    session$onFlushed(function() {
+      later::later(function() {
+        shiny::withReactiveDomain(session, {
+          on.exit({
+            state$score_save_pending <- FALSE
+          }, add = TRUE)
+
+          tryCatch(
+            {
+              record_score(final_username, final_score, round_count)
+              state$score_saved <- TRUE
+              load_leaderboard_async(10L, refresh = TRUE)
+            },
+            error = function(err) {
+              state$leaderboard_loading <- FALSE
+              showNotification(
+                sprintf(
+                  "Nao foi possivel salvar a pontuacao: %s",
+                  conditionMessage(err)
+                ),
+                type = "error"
+              )
+            }
+          )
+        })
+      }, delay = 0)
+    }, once = TRUE)
+
+    invisible(NULL)
   }
 
   # Start the game only after the player provides a username.
@@ -1027,6 +1066,13 @@ server <- function(input, output, session) {
 
   # Evaluate the selected answer, show the reveal text, and advance the game.
   observeEvent(input$submit_guess, {
+    req(
+      state$started,
+      !state$finished,
+      !is.null(state$current_choices),
+      nrow(state$current_choices) == 4L
+    )
+
     guess <- input_value(input$guess)
 
     if (!nzchar(guess)) {
@@ -1037,8 +1083,9 @@ server <- function(input, output, session) {
       return()
     }
 
-    species <- current_species()
-    selected_choice <- state$current_choices |>
+    species <- isolate(current_species())
+    round_choices <- isolate(state$current_choices)
+    selected_choice <- round_choices |>
       dplyr::filter(choice_id == guess)
     matched <- nrow(selected_choice) == 1L &&
       identical(
@@ -1082,7 +1129,6 @@ server <- function(input, output, session) {
         current_species(),
         state$available_species
       )
-      reset_round_input(state$current_choices)
     }
   })
 
