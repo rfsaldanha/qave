@@ -406,6 +406,15 @@ app_theme <- bs_theme(
 ui <- page_fluid(
   theme = app_theme,
   tags$head(
+    tags$script(async = NA, src = "https://www.googletagmanager.com/gtag/js?id=G-JERY6P5EXE"),
+    tags$script(HTML(
+      "
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){dataLayer.push(arguments);}
+      gtag('js', new Date());
+      gtag('config', 'G-JERY6P5EXE');
+      "
+    )),
     # Custom CSS gives the game a card-based layout and bird-focused styling.
     tags$style(HTML(
       "
