@@ -1,0 +1,9 @@
+.git
+.gitignore
+.Renviron
+.Rhistory
+.RData
+.Rapp.history
+.Ruserdata
+.posit
+leaderboard.sqlite

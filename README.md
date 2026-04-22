@@ -50,6 +50,7 @@ Install these R packages:
 - `DBI`
 - `RPostgres`
 - `stringi`
+- `later`
 
 ## Run locally
 
@@ -90,15 +91,21 @@ When the app starts, it will ensure the leaderboard tables exist in the configur
 
 ## Deploy to DigitalOcean
 
-For DigitalOcean App Platform, add the same database variables in the app settings.
-Store `DB_PASSWORD` as a secret instead of committing it to the repository.
+This repository includes a Docker-based App Platform setup:
 
-The simplest setup is:
+- `Dockerfile`: builds an R runtime for Shiny and starts the app on `PORT`
+- `start-app.R`: binds the app to `0.0.0.0` for container hosting
+- `.do/app.yaml`: App Platform spec for `rfsaldanha/qave`
 
-1. Keep `.Renviron` only for local development.
-2. Add `DB_PASSWORD` in DigitalOcean as a secret.
-3. Add the remaining `DB_*` variables in DigitalOcean only if you need values that
-   differ from the defaults in `app.R`.
+To deploy:
+
+1. Push the repository to GitHub.
+2. In DigitalOcean App Platform, create a new app from the repo or import `.do/app.yaml`.
+3. Replace `DB_PASSWORD` with a real secret before the first deploy.
+4. Keep `.Renviron` only for local development and never commit it.
+
+The app expects the same `DB_*` variables in DigitalOcean that it uses locally.
+If you keep the defaults from `app.R`, only `DB_PASSWORD` must be set explicitly.
 
 ## Gameplay
 
@@ -111,7 +118,8 @@ The simplest setup is:
 ## Project files
 
 - `app.R`: complete Shiny application
-- `inaturalist_birds_rj.parquet`: species dataset used by the app
+- `start-app.R`: container entrypoint for hosted deployment
+- `.do/app.yaml`: DigitalOcean App Platform specification
 
 ## License
 
