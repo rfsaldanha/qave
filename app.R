@@ -133,10 +133,8 @@ load_state_species_data <- function(path, state_code, state_label) {
     dplyr::filter(
       !is.na(common_name),
       !is.na(scientific_name),
-      !is.na(audio_url),
       nzchar(common_name),
       nzchar(scientific_name),
-      nzchar(audio_url),
       lengths(photo_urls) > 0
     ) |>
     dplyr::mutate(
@@ -153,6 +151,11 @@ load_state_species_data <- function(path, state_code, state_label) {
       brief_description = value_or_default(
         brief_description,
         "Sem descrição breve disponível para esta espécie."
+      ),
+      audio_url = ifelse(
+        !is.na(audio_url) & nzchar(trimws(audio_url)),
+        trimws(audio_url),
+        NA_character_
       ),
       wiki_url = ifelse(
         !is.na(wiki_url) & nzchar(trimws(wiki_url)),
@@ -426,7 +429,7 @@ ui <- page_fluid(
       class = "hero",
       h1("Que ave é essa?"),
       p(
-        "Tente identificar aves observadas em um ou mais estados do Brasil usando a foto e a vocalização."
+        "Tente identificar aves observadas em um ou mais estados do Brasil usando a foto e, quando disponível, a vocalização."
       ),
       p(
         class = "credits",
@@ -617,7 +620,7 @@ server <- function(input, output, session) {
     if (nrow(available_species) < round_count) {
       showNotification(
         sprintf(
-          "As familias selecionadas têm apenas %d aves com foto e som. Escolha pelo menos %d.",
+          "As familias selecionadas têm apenas %d aves com foto disponível. Escolha pelo menos %d.",
           nrow(available_species),
           round_count
         ),
@@ -896,12 +899,19 @@ server <- function(input, output, session) {
             ),
             tags$div(
               style = "margin: 18px 0;",
-              tags$audio(
-                src = species$audio_url[[1]],
-                controls = NA,
-                preload = "none",
-                style = "width: 100%;"
-              )
+              if (!isTRUE(is.na(species$audio_url[[1]]))) {
+                tags$audio(
+                  src = species$audio_url[[1]],
+                  controls = NA,
+                  preload = "none",
+                  style = "width: 100%;"
+                )
+              } else {
+                tags$p(
+                  class = "credits",
+                  "Esta ave não tem gravação de som disponível nesta rodada."
+                )
+              }
             ),
             radioButtons(
               "guess",
