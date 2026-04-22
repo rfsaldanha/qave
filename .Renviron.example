@@ -1,0 +1,6 @@
+DB_NAME=qave-leaderboard
+DB_HOST=db-postgresql-sfo3-66309-do-user-737434-0.m.db.ondigitalocean.com
+DB_PORT=25060
+DB_USER=qave-app
+DB_PASSWORD=replace-me
+DB_SSLMODE=require

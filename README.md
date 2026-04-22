@@ -8,7 +8,7 @@ Each game has 10 rounds. In every round, the app shows:
 - one bird audio recording
 - four answer options with common and scientific names
 
-Scores are stored locally in SQLite and shown in a leaderboard.
+Scores are stored in a Postgres database and shown in a leaderboard.
 
 ## Features
 
@@ -16,7 +16,7 @@ Scores are stored locally in SQLite and shown in a leaderboard.
 - multiple-choice answers
 - accent-insensitive answer matching
 - family-based filtering before starting a game
-- local leaderboard with total score, best score, and last score
+- leaderboard backed by Postgres with total score, best score, and last score
 - species descriptions and reference links when available
 
 ## Data
@@ -48,10 +48,19 @@ Install these R packages:
 - `arrow`
 - `dplyr`
 - `DBI`
-- `RSQLite`
+- `RPostgres`
 - `stringi`
 
 ## Run locally
+
+Create a `.Renviron` file in the project root with your database settings. You can
+copy `.Renviron.example` and replace `DB_PASSWORD` with the real password.
+
+Example:
+
+```sh
+cp .Renviron.example .Renviron
+```
 
 From the project directory, start the app with:
 
@@ -65,9 +74,10 @@ or:
 Rscript -e "shiny::runApp()"
 ```
 
-When the app starts, it will also create a local SQLite database file:
+When the app starts, it will ensure the leaderboard tables exist in the configured Postgres database.
 
-- `leaderboard.sqlite`
+For DigitalOcean App Platform, add the same variables in the app settings and store
+`DB_PASSWORD` as a secret.
 
 ## Gameplay
 
@@ -81,7 +91,6 @@ When the app starts, it will also create a local SQLite database file:
 
 - `app.R`: complete Shiny application
 - `inaturalist_birds_rj.parquet`: species dataset used by the app
-- `leaderboard.sqlite`: generated locally after the first run
 
 ## License
 

@@ -4,12 +4,46 @@ library(shinyWidgets)
 library(arrow)
 library(dplyr)
 library(DBI)
-library(RSQLite)
+library(RPostgres)
 library(stringi)
 
 # Game setup shared across the app.
 round_count <- 10L
-db_path <- "leaderboard.sqlite"
+
+required_env <- function(name) {
+  value <- Sys.getenv(name, "")
+
+  if (!nzchar(value)) {
+    stop(
+      sprintf(
+        paste(
+          "Missing required environment variable %s.",
+          "Set it in your local .Renviron before running the app."
+        ),
+        shQuote(name)
+      ),
+      call. = FALSE
+    )
+  }
+
+  value
+}
+
+db_config <- list(
+  dbname = Sys.getenv("DB_NAME", "qave-leaderboard"),
+  host = Sys.getenv(
+    "DB_HOST",
+    "db-postgresql-sfo3-66309-do-user-737434-0.m.db.ondigitalocean.com"
+  ),
+  port = as.integer(Sys.getenv("DB_PORT", "25060")),
+  user = Sys.getenv("DB_USER", "qave-app"),
+  password = required_env("DB_PASSWORD"),
+  sslmode = Sys.getenv("DB_SSLMODE", "require")
+)
+db_connection <- NULL
+leaderboard_cache <- NULL
+leaderboard_cache_loaded_at <- as.POSIXct(NA)
+leaderboard_cache_ttl_secs <- 30
 state_name_lookup <- c(
   ac = "Acre",
   al = "Alagoas",
@@ -76,11 +110,67 @@ value_or_default <- function(value, default) {
   ifelse(!is.na(value) & nzchar(trimws(value)), trimws(value), default)
 }
 
-# Open a short-lived SQLite connection for one operation.
-with_db_connection <- function(path = db_path, fn) {
-  conn <- DBI::dbConnect(RSQLite::SQLite(), path)
-  on.exit(DBI::dbDisconnect(conn), add = TRUE)
-  fn(conn)
+# Open or refresh the shared Postgres connection used by the app.
+connect_db <- function(config = db_config) {
+  DBI::dbConnect(
+    RPostgres::Postgres(),
+    dbname = config$dbname,
+    host = config$host,
+    port = config$port,
+    user = config$user,
+    password = config$password,
+    sslmode = config$sslmode
+  )
+}
+
+# Reuse one Postgres connection so leaderboard queries do not pay a reconnect cost.
+get_db_connection <- function(config = db_config, reset = FALSE) {
+  if (
+    reset ||
+      is.null(db_connection) ||
+      !DBI::dbIsValid(db_connection)
+  ) {
+    if (!is.null(db_connection) && DBI::dbIsValid(db_connection)) {
+      DBI::dbDisconnect(db_connection)
+    }
+
+    db_connection <<- connect_db(config)
+  }
+
+  db_connection
+}
+
+# Run one database operation and reconnect once if the shared handle has gone stale.
+with_db_connection <- function(fn, config = db_config) {
+  conn <- get_db_connection(config)
+
+  tryCatch(
+    fn(conn),
+    error = function(err) {
+      if (!DBI::dbIsValid(conn)) {
+        conn <- get_db_connection(config, reset = TRUE)
+        return(fn(conn))
+      }
+
+      stop(err)
+    }
+  )
+}
+
+# Cache the top leaderboard rows briefly to keep the UI responsive between refreshes.
+update_leaderboard_cache <- function(data) {
+  leaderboard_cache <<- data
+  leaderboard_cache_loaded_at <<- Sys.time()
+  invisible(data)
+}
+
+# Determine whether the cached leaderboard can satisfy the current request.
+leaderboard_cache_is_fresh <- function(limit) {
+  !is.null(leaderboard_cache) &&
+    !is.na(leaderboard_cache_loaded_at) &&
+    nrow(leaderboard_cache) >= limit &&
+    as.numeric(difftime(Sys.time(), leaderboard_cache_loaded_at, units = "secs")) <
+      leaderboard_cache_ttl_secs
 }
 
 # Discover the parquet files available for each Brazilian state.
@@ -190,18 +280,20 @@ load_species_data <- function(state_files = list_state_files()) {
   dplyr::bind_rows(species_by_state)
 }
 
-# Create the local SQLite tables used to store scores and leaderboard totals.
-init_db <- function(path = db_path) {
-  with_db_connection(path, function(conn) {
+# Create the Postgres tables used to store scores and leaderboard totals.
+init_db <- function(config = db_config) {
+  with_db_connection(function(conn) {
+    DBI::dbExecute(conn, "SET client_min_messages TO warning")
+
     DBI::dbExecute(
       conn,
       paste(
         "CREATE TABLE IF NOT EXISTS game_results (",
-        "id INTEGER PRIMARY KEY AUTOINCREMENT,",
+        "id BIGSERIAL PRIMARY KEY,",
         "username TEXT NOT NULL,",
         "score INTEGER NOT NULL,",
         "rounds INTEGER NOT NULL,",
-        "played_at TEXT NOT NULL",
+        "played_at TIMESTAMPTZ NOT NULL",
         ")"
       )
     )
@@ -215,11 +307,19 @@ init_db <- function(path = db_path) {
         "games_played INTEGER NOT NULL DEFAULT 0,",
         "best_score INTEGER NOT NULL DEFAULT 0,",
         "last_score INTEGER NOT NULL DEFAULT 0,",
-        "last_played_at TEXT NOT NULL",
+        "last_played_at TIMESTAMPTZ NOT NULL",
         ")"
       )
     )
-  })
+
+    DBI::dbExecute(
+      conn,
+      paste(
+        "CREATE INDEX IF NOT EXISTS leaderboard_rank_idx",
+        "ON leaderboard (total_score DESC, best_score DESC, last_played_at DESC)"
+      )
+    )
+  }, config = config)
 }
 
 # Save one finished game and update the aggregate leaderboard for the same user.
@@ -227,14 +327,14 @@ record_score <- function(
   username,
   score,
   rounds = round_count,
-  path = db_path
+  config = db_config
 ) {
-  played_at <- format(Sys.time(), "%Y-%m-%d %H:%M:%S")
+  played_at <- Sys.time()
 
-  with_db_connection(path, function(conn) {
+  with_db_connection(function(conn) {
     DBI::dbExecute(
       conn,
-      "INSERT INTO game_results (username, score, rounds, played_at) VALUES (?, ?, ?, ?)",
+      "INSERT INTO game_results (username, score, rounds, played_at) VALUES ($1, $2, $3, $4)",
       params = list(username, score, rounds, played_at)
     )
 
@@ -242,33 +342,42 @@ record_score <- function(
       conn,
       paste(
         "INSERT INTO leaderboard (username, total_score, games_played, best_score, last_score, last_played_at)",
-        "VALUES (?, ?, 1, ?, ?, ?)",
+        "VALUES ($1, $2, 1, $3, $4, $5)",
         "ON CONFLICT(username) DO UPDATE SET",
         "total_score = leaderboard.total_score + excluded.total_score,",
         "games_played = leaderboard.games_played + 1,",
-        "best_score = MAX(leaderboard.best_score, excluded.best_score),",
+        "best_score = GREATEST(leaderboard.best_score, excluded.best_score),",
         "last_score = excluded.last_score,",
         "last_played_at = excluded.last_played_at"
       ),
       params = list(username, score, score, score, played_at)
     )
-  })
+  }, config = config)
 }
 
 # Read the top scores shown on the start screen and after a game ends.
-read_leaderboard <- function(limit = 10L, path = db_path) {
-  with_db_connection(path, function(conn) {
+read_leaderboard <- function(limit = 10L, config = db_config, refresh = FALSE) {
+  limit <- as.integer(limit)
+
+  if (!refresh && leaderboard_cache_is_fresh(limit)) {
+    return(utils::head(leaderboard_cache, limit))
+  }
+
+  leaderboard <- with_db_connection(function(conn) {
     DBI::dbGetQuery(
       conn,
       paste(
         "SELECT username, total_score, games_played, best_score, last_score, last_played_at",
         "FROM leaderboard",
         "ORDER BY total_score DESC, best_score DESC, last_played_at DESC",
-        "LIMIT ?"
+        "LIMIT $1"
       ),
       params = list(limit)
     )
-  })
+  }, config = config)
+
+  update_leaderboard_cache(leaderboard)
+  leaderboard
 }
 
 # Load game data and ensure the score database exists before the app starts.
@@ -399,6 +508,30 @@ ui <- page_fluid(
       .leader-title {
         margin-bottom: 14px;
       }
+      .leaderboard-loading {
+        display: grid;
+        place-items: center;
+        gap: 14px;
+        min-height: 180px;
+        text-align: center;
+        color: #114b37;
+      }
+      .leaderboard-spinner {
+        width: 52px;
+        height: 52px;
+        border-radius: 50%;
+        border: 5px solid rgba(31,111,80,0.15);
+        border-top-color: #1f6f50;
+        animation: leaderboard-spin 0.85s linear infinite;
+      }
+      @keyframes leaderboard-spin {
+        from {
+          transform: rotate(0deg);
+        }
+        to {
+          transform: rotate(360deg);
+        }
+      }
       .score-highlight {
         font-size: 1.25rem;
         font-weight: 700;
@@ -446,6 +579,7 @@ server <- function(input, output, session) {
     started = FALSE,
     finished = FALSE,
     viewing_leaderboard = FALSE,
+    leaderboard_loading = FALSE,
     username = "",
     score = 0L,
     current_index = 1L,
@@ -458,6 +592,38 @@ server <- function(input, output, session) {
     leaderboard = NULL,
     score_saved = FALSE
   )
+
+  leaderboard_loading_ui <- function(message = "Carregando ranking...") {
+    div(
+      class = "leaderboard-loading",
+      div(class = "leaderboard-spinner"),
+      tags$p(message)
+    )
+  }
+
+  load_leaderboard_async <- function(limit = 10L, refresh = FALSE) {
+    state$leaderboard_loading <- TRUE
+    state$leaderboard <- NULL
+
+    later::later(function() {
+      on.exit({
+        state$leaderboard_loading <- FALSE
+      }, add = TRUE)
+
+      leaderboard <- tryCatch(
+        read_leaderboard(limit, refresh = refresh),
+        error = function(err) {
+          showNotification(
+            sprintf("Nao foi possivel carregar o ranking: %s", conditionMessage(err)),
+            type = "error"
+          )
+          NULL
+        }
+      )
+
+      state$leaderboard <- leaderboard
+    }, delay = 0)
+  }
 
   # Render the latest answer feedback with a short description and external link.
   feedback_ui <- function(feedback) {
@@ -660,7 +826,7 @@ server <- function(input, output, session) {
   finish_game <- function() {
     if (!state$score_saved) {
       record_score(state$username, state$score, round_count)
-      state$leaderboard <- read_leaderboard(10L)
+      load_leaderboard_async(10L, refresh = TRUE)
       state$score_saved <- TRUE
     }
 
@@ -722,7 +888,7 @@ server <- function(input, output, session) {
   # Open the leaderboard view from the start screen.
   observeEvent(input$show_leaderboard, {
     state$viewing_leaderboard <- TRUE
-    state$leaderboard <- read_leaderboard(10L)
+    load_leaderboard_async(10L)
   })
 
   # Return from the leaderboard view to the initial screen.
@@ -808,7 +974,11 @@ server <- function(input, output, session) {
           div(
             class = "panel-card",
             h3("Top 10 pontuações"),
-            tableOutput("leaderboard_table"),
+            if (state$leaderboard_loading) {
+              leaderboard_loading_ui()
+            } else {
+              tableOutput("leaderboard_table")
+            },
             div(style = "margin-top: 18px;"),
             actionButton("back_to_start", "Voltar", class = "btn-warning")
           )
@@ -947,7 +1117,11 @@ server <- function(input, output, session) {
       ),
       feedback_ui(state$feedback),
       h4(class = "leader-title", "Top 10 pontuações"),
-      tableOutput("leaderboard_table"),
+      if (state$leaderboard_loading) {
+        leaderboard_loading_ui("Atualizando ranking...")
+      } else {
+        tableOutput("leaderboard_table")
+      },
       div(style = "margin-top: 18px;"),
       actionButton("play_again", "Jogar novamente", class = "btn-success")
     )
@@ -962,6 +1136,19 @@ server <- function(input, output, session) {
       )
 
       leaderboard <- state$leaderboard
+      leaderboard$last_played_at <- if (inherits(leaderboard$last_played_at, "POSIXt")) {
+        format(leaderboard$last_played_at, "%d/%m/%Y %H:%M:%S", tz = "America/Sao_Paulo")
+      } else {
+        format(
+          as.POSIXct(
+            as.numeric(leaderboard$last_played_at),
+            origin = "1970-01-01",
+            tz = "UTC"
+          ),
+          "%d/%m/%Y %H:%M:%S",
+          tz = "America/Sao_Paulo"
+        )
+      }
       names(leaderboard) <- c(
         "Usuário",
         "Pontuação Total",
