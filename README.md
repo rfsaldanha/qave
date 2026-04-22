@@ -107,6 +107,19 @@ To deploy:
 The app expects the same `DB_*` variables in DigitalOcean that it uses locally.
 If you keep the defaults from `app.R`, only `DB_PASSWORD` must be set explicitly.
 
+## Load test
+
+A deployment-level load test for the live App Platform URL lives in `loadtest/`.
+
+Run it with:
+
+```sh
+k6 run loadtest/k6-homepage.js
+```
+
+By default it targets `https://qave-app-4plrr.ondigitalocean.app`, and you can
+override that with `BASE_URL`.
+
 ## Gameplay
 
 1. Enter a username.
