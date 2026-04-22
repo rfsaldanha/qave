@@ -10,6 +10,35 @@ library(stringi)
 # Game setup shared across the app.
 round_count <- 10L
 db_path <- "leaderboard.sqlite"
+state_name_lookup <- c(
+  ac = "Acre",
+  al = "Alagoas",
+  am = "Amazonas",
+  ap = "Amapa",
+  ba = "Bahia",
+  ce = "Ceara",
+  df = "Distrito Federal",
+  es = "Espirito Santo",
+  go = "Goias",
+  ma = "Maranhao",
+  mg = "Minas Gerais",
+  ms = "Mato Grosso do Sul",
+  mt = "Mato Grosso",
+  pa = "Para",
+  pb = "Paraiba",
+  pe = "Pernambuco",
+  pi = "Piaui",
+  pr = "Parana",
+  rj = "Rio de Janeiro",
+  rn = "Rio Grande do Norte",
+  ro = "Rondonia",
+  rr = "Roraima",
+  rs = "Rio Grande do Sul",
+  sc = "Santa Catarina",
+  se = "Sergipe",
+  sp = "Sao Paulo",
+  to = "Tocantins"
+)
 
 # Normalize user guesses and species names so matching is accent- and case-insensitive.
 normalize_answer <- function(value) {
@@ -54,8 +83,36 @@ with_db_connection <- function(path = db_path, fn) {
   fn(conn)
 }
 
-# Load the species dataset and normalize source-specific column names for the app.
-load_species_data <- function(path = "inaturalist_birds_rj.parquet") {
+# Discover the parquet files available for each Brazilian state.
+list_state_files <- function(pattern = "^inaturalist_birds_([a-z]{2})\\.parquet$") {
+  parquet_files <- list.files(
+    path = ".",
+    pattern = pattern,
+    full.names = TRUE
+  )
+
+  if (length(parquet_files) == 0) {
+    stop("No state parquet files were found in the application directory.")
+  }
+
+  state_codes <- sub(pattern, "\\1", basename(parquet_files))
+  state_labels <- ifelse(
+    state_codes %in% names(state_name_lookup),
+    sprintf("%s (%s)", state_name_lookup[state_codes], toupper(state_codes)),
+    toupper(state_codes)
+  )
+
+  data.frame(
+    state_code = state_codes,
+    state_label = unname(state_labels),
+    path = parquet_files,
+    stringsAsFactors = FALSE
+  ) |>
+    dplyr::arrange(state_label)
+}
+
+# Load one state dataset and normalize source-specific column names for the app.
+load_state_species_data <- function(path, state_code, state_label) {
   species <- arrow::read_parquet(path) |>
     as.data.frame()
 
@@ -102,6 +159,8 @@ load_species_data <- function(path = "inaturalist_birds_rj.parquet") {
         trimws(wiki_url),
         NA_character_
       ),
+      state_code = state_code,
+      state_label = state_label,
       common_name_norm = vapply(common_name, normalize_answer, character(1)),
       scientific_name_norm = vapply(
         scientific_name,
@@ -112,11 +171,20 @@ load_species_data <- function(path = "inaturalist_birds_rj.parquet") {
     dplyr::filter(!is.na(round_photo), nzchar(round_photo)) |>
     dplyr::distinct(common_name, scientific_name, .keep_all = TRUE)
 
-  if (nrow(species) < round_count) {
-    stop("Not enough species with both image and audio to start the game.")
-  }
-
   species
+}
+
+# Load all state datasets up front so the app can filter them reactively.
+load_species_data <- function(state_files = list_state_files()) {
+  species_by_state <- lapply(seq_len(nrow(state_files)), function(i) {
+    load_state_species_data(
+      path = state_files$path[[i]],
+      state_code = state_files$state_code[[i]],
+      state_label = state_files$state_label[[i]]
+    )
+  })
+
+  dplyr::bind_rows(species_by_state)
 }
 
 # Create the local SQLite tables used to store scores and leaderboard totals.
@@ -201,8 +269,13 @@ read_leaderboard <- function(limit = 10L, path = db_path) {
 }
 
 # Load game data and ensure the score database exists before the app starts.
-species_data <- load_species_data()
-family_choices <- sort(unique(species_data$family))
+state_files <- list_state_files()
+species_data <- load_species_data(state_files)
+state_choices <- stats::setNames(
+  state_files$state_code,
+  state_files$state_label
+)
+all_state_codes <- unname(state_choices)
 init_db()
 
 # Define the visual theme used by the Shiny app.
@@ -353,7 +426,7 @@ ui <- page_fluid(
       class = "hero",
       h1("Que ave é essa?"),
       p(
-        "Tente identificar aves observadas no estado do Rio de Janeiro usando a foto e a vocalização."
+        "Tente identificar aves observadas em um ou mais estados do Brasil usando a foto e a vocalização."
       ),
       p(
         class = "credits",
@@ -375,7 +448,8 @@ server <- function(input, output, session) {
     current_index = 1L,
     questions = NULL,
     available_species = NULL,
-    selected_families = family_choices,
+    selected_states = all_state_codes,
+    selected_families = character(0),
     current_choices = NULL,
     feedback = NULL,
     leaderboard = NULL,
@@ -425,16 +499,36 @@ server <- function(input, output, session) {
     state$questions[state$current_index, , drop = FALSE]
   })
 
-  # Restrict the game pool to the families chosen on the start screen.
-  species_pool <- function(selected_families) {
+  # Restrict the game pool to the states and families chosen on the start screen.
+  species_pool <- function(selected_states, selected_families) {
+    selected_states <- selected_states[!is.na(selected_states)]
     selected_families <- selected_families[!is.na(selected_families)]
 
-    if (length(selected_families) == 0) {
+    if (length(selected_states) == 0 || length(selected_families) == 0) {
       return(species_data[0, , drop = FALSE])
     }
 
     species_data |>
-      dplyr::filter(family %in% selected_families)
+      dplyr::filter(
+        state_code %in% selected_states,
+        family %in% selected_families
+      ) |>
+      dplyr::distinct(common_name, scientific_name, .keep_all = TRUE)
+  }
+
+  # Family choices depend on the states currently selected by the user.
+  family_choices_for_states <- function(selected_states) {
+    selected_states <- selected_states[!is.na(selected_states)]
+
+    if (length(selected_states) == 0) {
+      return(character(0))
+    }
+
+    species_data |>
+      dplyr::filter(state_code %in% selected_states) |>
+      dplyr::distinct(family) |>
+      dplyr::arrange(family) |>
+      dplyr::pull(family)
   }
 
   # Build four answer choices: the correct species plus three random distractors.
@@ -501,8 +595,16 @@ server <- function(input, output, session) {
   }
 
   # Start or restart a game by sampling the round species and resetting state.
-  start_game <- function(username, selected_families) {
-    available_species <- species_pool(selected_families)
+  start_game <- function(username, selected_states, selected_families) {
+    available_species <- species_pool(selected_states, selected_families)
+
+    if (length(selected_states) == 0) {
+      showNotification(
+        "Selecione pelo menos um estado antes de começar.",
+        type = "error"
+      )
+      return(invisible(FALSE))
+    }
 
     if (length(selected_families) == 0) {
       showNotification(
@@ -538,6 +640,7 @@ server <- function(input, output, session) {
     state$current_index <- 1L
     state$questions <- questions
     state$available_species <- available_species
+    state$selected_states <- selected_states
     state$selected_families <- selected_families
     state$current_choices <- build_round_choices(
       questions[1, , drop = FALSE],
@@ -564,6 +667,11 @@ server <- function(input, output, session) {
   # Start the game only after the player provides a username.
   observeEvent(input$start_game, {
     username <- trimws(input_value(input$username))
+    selected_states <- if (is.null(input$state_filter)) {
+      character(0)
+    } else {
+      input$state_filter
+    }
     selected_families <- if (is.null(input$family_filter)) {
       character(0)
     } else {
@@ -578,8 +686,35 @@ server <- function(input, output, session) {
       return()
     }
 
-    start_game(username, selected_families)
+    start_game(username, selected_states, selected_families)
   })
+
+  # Keep the family picker aligned with the states chosen on the start screen.
+  observeEvent(input$state_filter, {
+    selected_states <- if (is.null(input$state_filter)) {
+      character(0)
+    } else {
+      input$state_filter
+    }
+    available_families <- family_choices_for_states(selected_states)
+    current_selection <- if (is.null(input$family_filter)) {
+      character(0)
+    } else {
+      input$family_filter
+    }
+    retained_families <- intersect(current_selection, available_families)
+
+    if (length(selected_states) > 0 && length(retained_families) == 0) {
+      retained_families <- available_families
+    }
+
+    updatePickerInput(
+      session,
+      "family_filter",
+      choices = available_families,
+      selected = retained_families
+    )
+  }, ignoreInit = TRUE)
 
   # Open the leaderboard view from the start screen.
   observeEvent(input$show_leaderboard, {
@@ -655,7 +790,11 @@ server <- function(input, output, session) {
 
   # Replay the game for the same user after a finished round set.
   observeEvent(input$play_again, {
-    start_game(state$username, state$selected_families)
+    start_game(
+      state$username,
+      state$selected_states,
+      state$selected_families
+    )
   })
 
   # Swap between the start screen, the active round UI, and the final score view.
@@ -678,14 +817,31 @@ server <- function(input, output, session) {
           class = "panel-card",
           h3("Comece uma nova partida"),
           p(
-            "Escolha um nome de usuário e tente identificar 10 aves sorteadas aleatoriamente."
+            "Escolha um nome de usuário, um ou mais estados e tente identificar 10 aves sorteadas aleatoriamente."
           ),
           textInput("username", "Nome de usuário"),
           shinyWidgets::pickerInput(
+            "state_filter",
+            "Estados",
+            choices = state_choices,
+            selected = all_state_codes,
+            multiple = TRUE,
+            options = shinyWidgets::pickerOptions(
+              `actions-box` = TRUE,
+              `deselect-all-text` = "Limpar",
+              `live-search` = TRUE,
+              `live-search-placeholder` = "Buscar estado",
+              `none-selected-text` = "Selecione um ou mais estados",
+              `select-all-text` = "Selecionar todos",
+              `selected-text-format` = "count > 4",
+              size = 10
+            )
+          ),
+          shinyWidgets::pickerInput(
             "family_filter",
             "Famílias",
-            choices = family_choices,
-            selected = family_choices,
+            choices = family_choices_for_states(all_state_codes),
+            selected = family_choices_for_states(all_state_codes),
             multiple = TRUE,
             options = shinyWidgets::pickerOptions(
               `actions-box` = TRUE,
@@ -701,8 +857,8 @@ server <- function(input, output, session) {
           p(
             class = "credits",
             sprintf(
-              "Todas as %d famílias disponíveis já vêm selecionadas por padrão.",
-              length(family_choices)
+              "%d estados e todas as famílias disponíveis para eles já vêm selecionados por padrão.",
+              length(all_state_codes)
             )
           ),
           actionButton("start_game", "Começar a jogar", class = "btn-success"),
