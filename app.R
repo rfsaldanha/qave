@@ -831,10 +831,12 @@ server <- function(input, output, session) {
             multiple = TRUE,
             options = shinyWidgets::pickerOptions(
               `actions-box` = TRUE,
+              `count-selected-text` = "{0} estados selecionados",
               `deselect-all-text` = "Limpar",
               `live-search` = TRUE,
               `live-search-placeholder` = "Buscar estado",
               `none-selected-text` = "Selecione um ou mais estados",
+              `none-results-text` = "Nenhum estado encontrado para {0}",
               `select-all-text` = "Selecionar todos",
               `selected-text-format` = "count > 4",
               size = 10
@@ -848,10 +850,12 @@ server <- function(input, output, session) {
             multiple = TRUE,
             options = shinyWidgets::pickerOptions(
               `actions-box` = TRUE,
+              `count-selected-text` = "{0} famílias selecionadas",
               `deselect-all-text` = "Limpar",
               `live-search` = TRUE,
               `live-search-placeholder` = "Buscar família",
               `none-selected-text` = "Selecione uma ou mais famílias",
+              `none-results-text` = "Nenhuma família encontrada para {0}",
               `select-all-text` = "Selecionar todas",
               `selected-text-format` = "count > 4",
               size = 10
