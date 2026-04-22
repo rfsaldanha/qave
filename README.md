@@ -62,6 +62,18 @@ Example:
 cp .Renviron.example .Renviron
 ```
 
+The app reads these environment variables at startup:
+
+- `DB_NAME`
+- `DB_HOST`
+- `DB_PORT`
+- `DB_USER`
+- `DB_PASSWORD`
+- `DB_SSLMODE`
+
+After creating or editing `.Renviron`, restart your R session so the variables are
+available to the app.
+
 From the project directory, start the app with:
 
 ```r
@@ -76,8 +88,17 @@ Rscript -e "shiny::runApp()"
 
 When the app starts, it will ensure the leaderboard tables exist in the configured Postgres database.
 
-For DigitalOcean App Platform, add the same variables in the app settings and store
-`DB_PASSWORD` as a secret.
+## Deploy to DigitalOcean
+
+For DigitalOcean App Platform, add the same database variables in the app settings.
+Store `DB_PASSWORD` as a secret instead of committing it to the repository.
+
+The simplest setup is:
+
+1. Keep `.Renviron` only for local development.
+2. Add `DB_PASSWORD` in DigitalOcean as a secret.
+3. Add the remaining `DB_*` variables in DigitalOcean only if you need values that
+   differ from the defaults in `app.R`.
 
 ## Gameplay
 
