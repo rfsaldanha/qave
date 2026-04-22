@@ -9,6 +9,78 @@ library(stringi)
 
 # Game setup shared across the app.
 round_count <- 10L
+app_base_url <- Sys.getenv(
+  "APP_BASE_URL",
+  "https://qave.com.br"
+)
+app_title <- "Que ave é essa? Quiz de aves do Brasil"
+app_description <- paste(
+  "Jogue um quiz online para identificar aves do Brasil por foto e som.",
+  "Explore espécies observadas em vários estados brasileiros, filtre por família",
+  "e acompanhe o ranking de pontuações."
+)
+app_keywords <- paste(
+  c(
+    "quiz de aves",
+    "aves do Brasil",
+    "identificacao de aves",
+    "bird quiz Brazil",
+    "ornitologia",
+    "iNaturalist",
+    "aves brasileiras"
+  ),
+  collapse = ", "
+)
+app_structured_data <- sprintf(
+  paste(
+    "{",
+    "\"@context\":\"https://schema.org\",",
+    "\"@graph\":[",
+    "{",
+    "\"@type\":\"WebSite\",",
+    "\"name\":\"Que ave é essa?\",",
+    "\"url\":\"%s\",",
+    "\"inLanguage\":\"pt-BR\",",
+    "\"description\":\"%s\"",
+    "},",
+    "{",
+    "\"@type\":\"WebApplication\",",
+    "\"name\":\"Que ave é essa?\",",
+    "\"url\":\"%s\",",
+    "\"applicationCategory\":\"GameApplication\",",
+    "\"operatingSystem\":\"Web\",",
+    "\"inLanguage\":\"pt-BR\",",
+    "\"description\":\"%s\",",
+    "\"offers\":{\"@type\":\"Offer\",\"price\":\"0\",\"priceCurrency\":\"BRL\"}",
+    "},",
+    "{",
+    "\"@type\":\"FAQPage\",",
+    "\"mainEntity\":[",
+    "{",
+    "\"@type\":\"Question\",",
+    "\"name\":\"Como funciona o quiz?\",",
+    "\"acceptedAnswer\":{\"@type\":\"Answer\",\"text\":\"Cada partida tem 10 rodadas. Em cada rodada, voce ve a foto de uma ave, pode ouvir a vocalizacao quando disponivel e escolhe uma entre quatro alternativas.\"}",
+    "},",
+    "{",
+    "\"@type\":\"Question\",",
+    "\"name\":\"Quais aves aparecem no jogo?\",",
+    "\"acceptedAnswer\":{\"@type\":\"Answer\",\"text\":\"O app usa registros de aves observadas em estados do Brasil com foto disponivel e, quando possivel, audio e descricao breve.\"}",
+    "},",
+    "{",
+    "\"@type\":\"Question\",",
+    "\"name\":\"Posso filtrar por estado e familia?\",",
+    "\"acceptedAnswer\":{\"@type\":\"Answer\",\"text\":\"Sim. Antes de iniciar a partida, voce pode escolher um ou mais estados e limitar o jogo a familias especificas de aves.\"}",
+    "}",
+    "]",
+    "}",
+    "]",
+    "}"
+  ),
+  app_base_url,
+  app_description,
+  app_base_url,
+  app_description
+)
 
 required_env <- function(name) {
   value <- Sys.getenv(name, "")
@@ -404,8 +476,26 @@ app_theme <- bs_theme(
 
 # Build the static page shell; the main content area is filled reactively by the server.
 ui <- page_fluid(
+  title = app_title,
   theme = app_theme,
   tags$head(
+    tags$meta(charset = "utf-8"),
+    tags$meta(name = "viewport", content = "width=device-width, initial-scale=1"),
+    tags$meta(name = "description", content = app_description),
+    tags$meta(name = "keywords", content = app_keywords),
+    tags$meta(name = "robots", content = "index,follow,max-image-preview:large"),
+    tags$link(rel = "canonical", href = app_base_url),
+    tags$meta(property = "og:type", content = "website"),
+    tags$meta(property = "og:locale", content = "pt_BR"),
+    tags$meta(property = "og:site_name", content = "Que ave é essa?"),
+    tags$meta(property = "og:title", content = app_title),
+    tags$meta(property = "og:description", content = app_description),
+    tags$meta(property = "og:url", content = app_base_url),
+    tags$meta(name = "twitter:card", content = "summary"),
+    tags$meta(name = "twitter:title", content = app_title),
+    tags$meta(name = "twitter:description", content = app_description),
+    tags$script(HTML("document.documentElement.lang = 'pt-BR';")),
+    tags$script(type = "application/ld+json", HTML(app_structured_data)),
     tags$script(async = NA, src = "https://www.googletagmanager.com/gtag/js?id=G-JERY6P5EXE"),
     tags$script(HTML(
       "
@@ -562,20 +652,50 @@ ui <- page_fluid(
         font-size: 0.95rem;
         color: #52606d;
       }
+      .seo-copy h2,
+      .seo-copy h3 {
+        margin-top: 0;
+      }
+      .seo-copy p:last-child,
+      .seo-copy ul:last-child {
+        margin-bottom: 0;
+      }
+      .seo-copy ul {
+        padding-left: 1.2rem;
+      }
     "
     ))
   ),
   div(
     class = "shell",
     div(
-      class = "hero",
+      class = "hero seo-copy",
       h1("Que ave é essa?"),
       p(
         "Tente identificar aves observadas em um ou mais estados do Brasil usando a foto e, quando disponível, a vocalização."
       ),
+      tags$h2("Quiz online para identificar aves do Brasil"),
+      tags$p(
+        "O Que ave é essa? é um quiz gratuito para identificar aves do Brasil por foto e, quando disponível, por vocalização. Antes de começar, você pode filtrar a partida por estado e por família."
+      ),
+      tags$p(
+        "O app usa imagens e sons de registros do iNaturalist e mostra uma breve descrição da espécie após cada resposta, quando esse conteúdo está disponível."
+      ),
+      tags$h3("Como funciona"),
+      tags$ul(
+        tags$li("Escolha um nome de usuário e selecione um ou mais estados."),
+        tags$li("Filtre o jogo pelas famílias de aves que você quer praticar."),
+        tags$li("Veja a foto da ave, ouça a vocalização quando houver e responda entre quatro opções.")
+      ),
       p(
         class = "credits",
         "Créditos: imagens e sons do iNaturalist; descrições e links de referência da Wikipedia quando disponíveis."
+      ),
+      tags$noscript(
+        tags$p(
+          class = "credits",
+          "Este app precisa de JavaScript para carregar o jogo interativo, mas o conteúdo desta página resume como o quiz funciona e quais dados ele utiliza."
+        )
       )
     ),
     uiOutput("app_body")
@@ -1078,7 +1198,10 @@ server <- function(input, output, session) {
             tags$img(
               class = "bird-photo",
               src = species$round_photo[[1]],
-              alt = species$common_name[[1]]
+              alt = sprintf(
+                "Foto para identificar a ave da rodada %d do quiz",
+                state$current_index
+              )
             ),
             tags$div(
               style = "margin: 18px 0;",
