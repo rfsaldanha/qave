@@ -116,6 +116,7 @@ db_connection <- NULL
 leaderboard_cache <- NULL
 leaderboard_cache_loaded_at <- as.POSIXct(NA)
 leaderboard_cache_ttl_secs <- 30
+leaderboard_prior_games <- 5L
 state_name_lookup <- c(
   ac = "Acre",
   al = "Alagoas",
@@ -417,8 +418,8 @@ init_db <- function(config = db_config) {
       DBI::dbExecute(
         conn,
         paste(
-          "CREATE INDEX IF NOT EXISTS leaderboard_rank_idx",
-          "ON leaderboard (total_score DESC, best_score DESC, last_played_at DESC)"
+          "CREATE INDEX IF NOT EXISTS leaderboard_fair_rank_idx",
+          "ON leaderboard (best_score DESC, total_score DESC, last_played_at DESC)"
         )
       )
     },
@@ -475,12 +476,41 @@ read_leaderboard <- function(limit = 10L, config = db_config, refresh = FALSE) {
       DBI::dbGetQuery(
         conn,
         paste(
-          "SELECT username, total_score, games_played, best_score, last_score, last_played_at",
+          "WITH ranked_leaderboard AS (",
+          "SELECT",
+          "username,",
+          "best_score,",
+          "ROUND(total_score::numeric / NULLIF(games_played, 0), 2) AS average_score,",
+          "ROUND((",
+          "total_score::numeric +",
+          "$2::numeric * COALESCE((SUM(total_score) OVER ())::numeric / NULLIF(SUM(games_played) OVER (), 0), 0)",
+          ") / NULLIF(games_played + $2, 0), 2) AS fair_score,",
+          "total_score,",
+          "games_played,",
+          "last_score,",
+          "last_played_at",
           "FROM leaderboard",
-          "ORDER BY total_score DESC, best_score DESC, last_played_at DESC",
+          ")",
+          "SELECT",
+          "username,",
+          "best_score,",
+          "average_score,",
+          "fair_score,",
+          "total_score,",
+          "games_played,",
+          "last_score,",
+          "last_played_at",
+          "FROM ranked_leaderboard",
+          "ORDER BY",
+          "fair_score DESC,",
+          "average_score DESC,",
+          "games_played DESC,",
+          "best_score DESC,",
+          "total_score DESC,",
+          "last_played_at DESC",
           "LIMIT $1"
         ),
-        params = list(limit)
+        params = list(limit, leaderboard_prior_games)
       )
     },
     config = config
@@ -762,6 +792,23 @@ server <- function(input, output, session) {
       class = "leaderboard-loading",
       div(class = "leaderboard-spinner"),
       tags$p(message)
+    )
+  }
+
+  leaderboard_methodology_ui <- function() {
+    tags$p(
+      class = "credits",
+      sprintf(
+        paste(
+          "A Pontuação Justa ordena o ranking por consistência, não só por uma",
+          "partida perfeita: ela combina a média real do jogador com a média geral",
+          "do ranking, usando %d partidas de confiança. Quanto mais partidas a pessoa",
+          "joga mantendo boa média, menos essa correção pesa. Em caso de empate,",
+          "entram média, partidas jogadas, melhor partida, pontuação total e data",
+          "mais recente."
+        ),
+        leaderboard_prior_games
+      )
     )
   }
 
@@ -1199,6 +1246,7 @@ server <- function(input, output, session) {
             } else {
               tableOutput("leaderboard_table")
             },
+            leaderboard_methodology_ui(),
             div(style = "margin-top: 18px;"),
             actionButton("back_to_start", "Voltar", class = "btn-warning")
           )
@@ -1347,6 +1395,7 @@ server <- function(input, output, session) {
       } else {
         tableOutput("leaderboard_table")
       },
+      leaderboard_methodology_ui(),
       div(style = "margin-top: 18px;"),
       actionButton("play_again", "Jogar novamente", class = "btn-success")
     )
@@ -1361,6 +1410,21 @@ server <- function(input, output, session) {
       )
 
       leaderboard <- state$leaderboard
+      leaderboard$rank <- seq_len(nrow(leaderboard))
+      leaderboard <- leaderboard |>
+        dplyr::select(
+          rank,
+          username,
+          fair_score,
+          best_score,
+          average_score,
+          total_score,
+          games_played,
+          last_score,
+          last_played_at
+        )
+      leaderboard$average_score <- sprintf("%.2f", leaderboard$average_score)
+      leaderboard$fair_score <- sprintf("%.2f", leaderboard$fair_score)
       leaderboard$last_played_at <- if (
         inherits(leaderboard$last_played_at, "POSIXt")
       ) {
@@ -1381,10 +1445,13 @@ server <- function(input, output, session) {
         )
       }
       names(leaderboard) <- c(
+        "Posição",
         "Usuário",
+        "Pontuação Justa",
+        "Melhor Partida",
+        "Média",
         "Pontuação Total",
         "Partidas Jogadas",
-        "Melhor Partida",
         "Última Pontuação",
         "Última Partida"
       )
