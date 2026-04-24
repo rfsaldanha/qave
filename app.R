@@ -816,6 +816,12 @@ ui <- page_fluid(
       .seo-copy ul {
         padding-left: 1.2rem;
       }
+      .about-links {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-top: 10px;
+      }
     "
     ))
   ),
@@ -838,7 +844,34 @@ ui <- page_fluid(
         )
       )
     ),
-    uiOutput("app_body")
+    uiOutput("app_body"),
+    div(
+      class = "panel-card seo-copy",
+      h3("Sobre"),
+      p(
+        "Contato: ",
+        tags$a(
+          href = "mailto:raphael.saldanha@fiocruz.br",
+          "raphael.saldanha@fiocruz.br"
+        )
+      ),
+      p("Código e dados do projeto:"),
+      div(
+        class = "about-links",
+        tags$a(
+          href = "https://github.com/rfsaldanha/qave",
+          target = "_blank",
+          rel = "noopener noreferrer",
+          "App QAVE"
+        ),
+        tags$a(
+          href = "https://github.com/rfsaldanha/bird_scrapper",
+          target = "_blank",
+          rel = "noopener noreferrer",
+          "Bird Scrapper"
+        )
+      )
+    )
   )
 )
 
