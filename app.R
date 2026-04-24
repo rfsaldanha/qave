@@ -570,6 +570,82 @@ ui <- page_fluid(
     tags$meta(name = "twitter:description", content = app_description),
     tags$script(HTML("document.documentElement.lang = 'pt-BR';")),
     tags$script(type = "application/ld+json", HTML(app_structured_data)),
+    tags$script(HTML(
+      "
+      (function() {
+        var cookieMaxAge = 60 * 60 * 24 * 180;
+        var handlersRegistered = false;
+
+        function setCookie(name, value) {
+          document.cookie = name + '=' + encodeURIComponent(value) +
+            '; max-age=' + cookieMaxAge + '; path=/; SameSite=Lax';
+        }
+
+        function getCookie(name) {
+          var prefix = name + '=';
+          var cookies = document.cookie ? document.cookie.split('; ') : [];
+
+          for (var i = 0; i < cookies.length; i++) {
+            if (cookies[i].indexOf(prefix) === 0) {
+              return decodeURIComponent(cookies[i].slice(prefix.length));
+            }
+          }
+
+          return '';
+        }
+
+        function parseArrayCookie(name) {
+          var value = getCookie(name);
+
+          if (!value) {
+            return [];
+          }
+
+          try {
+            var parsed = JSON.parse(value);
+            return Array.isArray(parsed) ? parsed : [];
+          } catch (error) {
+            return [];
+          }
+        }
+
+        function sendSavedPreferences() {
+          if (!window.Shiny || !Shiny.setInputValue) {
+            return;
+          }
+
+          Shiny.setInputValue('qave_saved_preferences', {
+            username: getCookie('qave_username'),
+            states: parseArrayCookie('qave_states'),
+            families: parseArrayCookie('qave_families'),
+            nonce: Math.random()
+          }, { priority: 'event' });
+        }
+
+        function registerMessageHandlers() {
+          if (handlersRegistered) {
+            return;
+          }
+
+          if (!window.Shiny || !Shiny.addCustomMessageHandler) {
+            return;
+          }
+
+          Shiny.addCustomMessageHandler('qave_save_preferences', function(data) {
+            setCookie('qave_username', data.username || '');
+            setCookie('qave_states', JSON.stringify(data.states || []));
+            setCookie('qave_families', JSON.stringify(data.families || []));
+          });
+          handlersRegistered = true;
+        }
+
+        document.addEventListener('shiny:connected', function() {
+          registerMessageHandlers();
+          sendSavedPreferences();
+        });
+      })();
+      "
+    )),
     tags$script(
       async = NA,
       src = "https://www.googletagmanager.com/gtag/js?id=G-JERY6P5EXE"
@@ -812,6 +888,64 @@ server <- function(input, output, session) {
     )
   }
 
+  valid_saved_values <- function(values, valid_values) {
+    values <- unlist(values, use.names = FALSE)
+    values <- values[!is.na(values) & nzchar(values)]
+    intersect(values, valid_values)
+  }
+
+  restore_saved_preferences <- function(preferences) {
+    if (!is.list(preferences)) {
+      return(invisible(NULL))
+    }
+
+    saved_username <- trimws(input_value(preferences$username))
+    saved_states <- valid_saved_values(preferences$states, all_state_codes)
+
+    if (length(saved_states) == 0) {
+      saved_states <- all_state_codes
+    }
+
+    available_families <- family_choices_for_states(saved_states)
+    saved_families <- valid_saved_values(
+      preferences$families,
+      available_families
+    )
+
+    if (length(saved_families) == 0) {
+      saved_families <- available_families
+    }
+
+    if (nzchar(saved_username)) {
+      updateTextInput(session, "username", value = saved_username)
+    }
+
+    updatePickerInput(
+      session,
+      "state_filter",
+      selected = saved_states
+    )
+    updatePickerInput(
+      session,
+      "family_filter",
+      choices = available_families,
+      selected = saved_families
+    )
+
+    invisible(NULL)
+  }
+
+  save_preferences_cookie <- function(username, selected_states, selected_families) {
+    session$sendCustomMessage(
+      "qave_save_preferences",
+      list(
+        username = username,
+        states = unname(selected_states),
+        families = unname(selected_families)
+      )
+    )
+  }
+
   # Defer leaderboard work until the next loop tick so the UI can paint first.
   load_leaderboard_async <- function(limit = 10L, refresh = FALSE) {
     state$leaderboard_loading <- TRUE
@@ -975,6 +1109,19 @@ server <- function(input, output, session) {
     }
   }
 
+  observeEvent(
+    input$qave_saved_preferences,
+    {
+      session$onFlushed(
+        function() {
+          restore_saved_preferences(input$qave_saved_preferences)
+        },
+        once = TRUE
+      )
+    },
+    ignoreInit = TRUE
+  )
+
   # Start or restart a game by sampling the round species and resetting state.
   start_game <- function(username, selected_states, selected_families) {
     available_species <- species_pool(selected_states, selected_families)
@@ -1111,7 +1258,11 @@ server <- function(input, output, session) {
       return()
     }
 
-    start_game(username, selected_states, selected_families)
+    game_started <- start_game(username, selected_states, selected_families)
+
+    if (isTRUE(game_started)) {
+      save_preferences_cookie(username, selected_states, selected_families)
+    }
   })
 
   # Keep the family picker aligned with the states chosen on the start screen.
