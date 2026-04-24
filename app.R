@@ -19,6 +19,7 @@ difficulty_multipliers <- c(
   medium = 1.25,
   hard = 1.5
 )
+hint_penalty <- 0.5
 default_difficulty <- "medium"
 app_base_url <- Sys.getenv(
   "APP_BASE_URL",
@@ -405,7 +406,7 @@ init_db <- function(config = db_config) {
           "CREATE TABLE IF NOT EXISTS game_results (",
           "id BIGSERIAL PRIMARY KEY,",
           "username TEXT NOT NULL,",
-          "score INTEGER NOT NULL,",
+          "score NUMERIC(5,1) NOT NULL,",
           "rounds INTEGER NOT NULL,",
           "played_at TIMESTAMPTZ NOT NULL",
           ")"
@@ -417,12 +418,30 @@ init_db <- function(config = db_config) {
         paste(
           "CREATE TABLE IF NOT EXISTS leaderboard (",
           "username TEXT PRIMARY KEY,",
-          "total_score INTEGER NOT NULL DEFAULT 0,",
+          "total_score NUMERIC(8,1) NOT NULL DEFAULT 0,",
           "games_played INTEGER NOT NULL DEFAULT 0,",
-          "best_score INTEGER NOT NULL DEFAULT 0,",
-          "last_score INTEGER NOT NULL DEFAULT 0,",
+          "best_score NUMERIC(5,1) NOT NULL DEFAULT 0,",
+          "last_score NUMERIC(5,1) NOT NULL DEFAULT 0,",
           "last_played_at TIMESTAMPTZ NOT NULL",
           ")"
+        )
+      )
+
+      DBI::dbExecute(
+        conn,
+        paste(
+          "ALTER TABLE game_results",
+          "ALTER COLUMN score TYPE NUMERIC(5,1) USING score::numeric"
+        )
+      )
+
+      DBI::dbExecute(
+        conn,
+        paste(
+          "ALTER TABLE leaderboard",
+          "ALTER COLUMN total_score TYPE NUMERIC(8,1) USING total_score::numeric,",
+          "ALTER COLUMN best_score TYPE NUMERIC(5,1) USING best_score::numeric,",
+          "ALTER COLUMN last_score TYPE NUMERIC(5,1) USING last_score::numeric"
         )
       )
 
@@ -683,6 +702,7 @@ ui <- page_fluid(
       .shell {
         max-width: 1080px;
         margin: 32px auto;
+        padding: 0 14px;
       }
       .hero, .panel-card {
         background: rgba(255,255,255,0.88);
@@ -716,11 +736,56 @@ ui <- page_fluid(
       }
       .bird-photo {
         width: 100%;
-        border-radius: 18px;
+        border-radius: 14px;
         object-fit: contain;
         max-height: 430px;
         border: 3px solid rgba(31,111,80,0.10);
         background: rgba(31,111,80,0.05);
+      }
+      .round-media {
+        margin: 14px 0;
+      }
+      .answer-group .form-check {
+        margin: 0 0 10px;
+        padding: 0;
+      }
+      .answer-group .form-check-input {
+        position: absolute;
+        opacity: 0;
+        pointer-events: none;
+      }
+      .answer-group .form-check-label {
+        display: block;
+        width: 100%;
+        min-height: 48px;
+        padding: 12px 14px;
+        border: 1px solid rgba(31,111,80,0.18);
+        border-radius: 12px;
+        background: rgba(255,255,255,0.82);
+        color: #1f2933;
+        line-height: 1.25;
+      }
+      .answer-group .form-check-input:checked + .form-check-label {
+        border-color: #1f6f50;
+        background: rgba(31,111,80,0.12);
+        box-shadow: inset 0 0 0 1px rgba(31,111,80,0.34);
+      }
+      .answer-group .form-check-label em {
+        color: #52606d;
+      }
+      .round-actions {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        margin-top: 12px;
+      }
+      .round-actions .btn {
+        min-height: 44px;
+      }
+      .table-responsive {
+        margin-top: 8px;
       }
       .feedback {
         display: flex;
@@ -813,6 +878,10 @@ ui <- page_fluid(
       .table {
         margin-bottom: 0;
       }
+      .table th,
+      .table td {
+        white-space: nowrap;
+      }
       .credits {
         margin-top: 14px;
         font-size: 0.95rem;
@@ -842,6 +911,42 @@ ui <- page_fluid(
         gap: 12px;
         flex-wrap: wrap;
         margin-top: 10px;
+      }
+      @media (max-width: 700px) {
+        .shell {
+          margin: 10px auto 18px;
+          padding: 0 10px;
+        }
+        .hero,
+        .panel-card {
+          border-radius: 14px;
+          padding: 16px;
+          margin-bottom: 14px;
+        }
+        .hero h1 {
+          font-size: 1.8rem;
+        }
+        .hero p {
+          font-size: 1rem;
+        }
+        .bird-photo {
+          max-height: 52vh;
+          border-width: 2px;
+        }
+        .round-actions {
+          display: grid;
+          grid-template-columns: 1fr;
+        }
+        .round-actions .btn,
+        .panel-card > .btn,
+        .panel-card > .btn-group,
+        .panel-card .btn {
+          width: 100%;
+        }
+        .answer-group .form-check-label {
+          min-height: 52px;
+          padding: 13px 12px;
+        }
       }
     "
     ))
@@ -937,7 +1042,7 @@ server <- function(input, output, session) {
           "A Pontuação Justa ordena o ranking por consistência, não só por uma",
           "partida perfeita. Cada partida multiplica os acertos pela dificuldade:",
           "Fácil x%.2f, Médio x%.2f e Difícil x%.2f; cada dica usada remove",
-          "1 ponto depois desse multiplicador. No fácil, a dica remove duas",
+          "%.1f ponto depois desse multiplicador. No fácil, a dica remove duas",
           "alternativas incorretas; no médio, remove uma; no difícil, não há dica.",
           "Depois, a Pontuação Justa combina a média real do jogador com a média",
           "geral do ranking, usando %d partidas de confiança. Quanto mais partidas",
@@ -948,6 +1053,7 @@ server <- function(input, output, session) {
         difficulty_multipliers[["easy"]],
         difficulty_multipliers[["medium"]],
         difficulty_multipliers[["hard"]],
+        hint_penalty,
         leaderboard_prior_games
       )
     )
@@ -1263,7 +1369,23 @@ server <- function(input, output, session) {
     difficulty = state$difficulty
   ) {
     multiplied_score <- floor(as.integer(score) * difficulty_multiplier(difficulty))
-    max(as.integer(multiplied_score) - as.integer(hints_used), 0L)
+    max(multiplied_score - (as.integer(hints_used) * hint_penalty), 0)
+  }
+
+  leaderboard_score <- function(
+    score = state$score,
+    hints_used = state$hints_used,
+    difficulty = state$difficulty
+  ) {
+    round(final_score(score, hints_used, difficulty), 1)
+  }
+
+  format_score <- function(score) {
+    if (identical(score, floor(score))) {
+      as.character(as.integer(score))
+    } else {
+      sprintf("%.1f", score)
+    }
   }
 
   observeEvent(
@@ -1356,7 +1478,7 @@ server <- function(input, output, session) {
   # Show the finished state immediately, then persist the score once per game.
   finish_game <- function() {
     final_username <- isolate(state$username)
-    saved_score <- isolate(final_score())
+    saved_score <- isolate(leaderboard_score())
 
     state$finished <- TRUE
 
@@ -1528,8 +1650,9 @@ server <- function(input, output, session) {
     state$current_hint_used <- TRUE
 
     state$current_hint <- sprintf(
-      "Dica: %d alternativa(s) incorreta(s) foram removidas. Usar dica reduz 1 ponto da pontuação final.",
-      nrow(removed_choices)
+      "Dica: %d alternativa(s) incorreta(s) foram removidas. Usar dica reduz %.1f ponto da pontuação final.",
+      nrow(removed_choices),
+      hint_penalty
     )
   })
 
@@ -1633,7 +1756,7 @@ server <- function(input, output, session) {
             if (state$leaderboard_loading) {
               leaderboard_loading_ui()
             } else {
-              tableOutput("leaderboard_table")
+              div(class = "table-responsive", tableOutput("leaderboard_table"))
             },
             leaderboard_methodology_ui(),
             div(style = "margin-top: 18px;"),
@@ -1726,12 +1849,12 @@ server <- function(input, output, session) {
         round_count
       )
       score_label <- sprintf(
-        "Acertos: %d | Dicas: %d | %s x%.2f | Pontuação atual: %d",
+        "Acertos: %d | Dicas: %d | %s x%.2f | Pontuação atual: %s",
         state$score,
         state$hints_used,
         difficulty_label(),
         difficulty_multiplier(),
-        final_score()
+        format_score(final_score())
       )
 
       return(
@@ -1755,7 +1878,7 @@ server <- function(input, output, session) {
               )
             ),
             tags$div(
-              style = "margin: 18px 0;",
+              class = "round-media",
               if (!isTRUE(is.na(species$audio_url[[1]]))) {
                 tags$audio(
                   src = species$audio_url[[1]],
@@ -1770,34 +1893,39 @@ server <- function(input, output, session) {
                 )
               }
             ),
-            radioButtons(
-              "guess",
-              "Escolha uma opção",
-              choiceNames = build_choice_names(state$current_choices),
-              choiceValues = unname(as.character(
-                state$current_choices$choice_id
-              ))
+            div(
+              class = "answer-group",
+              radioButtons(
+                "guess",
+                "Escolha uma opção",
+                choiceNames = build_choice_names(state$current_choices),
+                choiceValues = unname(as.character(
+                  state$current_choices$choice_id
+                ))
+              )
             ),
-            if (!identical(state$difficulty, "hard")) {
+            div(
+              class = "round-actions",
               actionButton(
+                "submit_guess",
+                "Enviar resposta",
+                class = "btn-warning"
+              ),
+              if (!identical(state$difficulty, "hard")) {
+                actionButton(
                 "show_hint",
                 if (identical(state$difficulty, "easy")) {
-                  "Dica: remover 2 (-1 ponto)"
+                  sprintf("Dica: remover 2 (-%.1f)", hint_penalty)
                 } else {
-                  "Dica: remover 1 (-1 ponto)"
+                  sprintf("Dica: remover 1 (-%.1f)", hint_penalty)
                 },
                 class = "btn-success"
               )
-            },
+              }
+            ),
             if (!is.null(state$current_hint)) {
               div(class = "hint-box", state$current_hint)
-            },
-            div(style = "margin-top: 12px;"),
-            actionButton(
-              "submit_guess",
-              "Enviar resposta",
-              class = "btn-warning"
-            )
+            }
           )
         )
       )
@@ -1809,14 +1937,14 @@ server <- function(input, output, session) {
       p(
         class = "score-highlight",
         sprintf(
-          "%s acertou %d de %d, usou %d dica(s), jogou no nível %s (x%.2f) e ficou com %d ponto(s).",
+          "%s acertou %d de %d, usou %d dica(s), jogou no nível %s (x%.2f) e ficou com %s ponto(s).",
           state$username,
           state$score,
           round_count,
           state$hints_used,
           difficulty_label(),
           difficulty_multiplier(),
-          final_score()
+          format_score(final_score())
         )
       ),
       feedback_ui(state$feedback),
@@ -1824,7 +1952,7 @@ server <- function(input, output, session) {
       if (state$leaderboard_loading) {
         leaderboard_loading_ui("Atualizando ranking...")
       } else {
-        tableOutput("leaderboard_table")
+        div(class = "table-responsive", tableOutput("leaderboard_table"))
       },
       leaderboard_methodology_ui(),
       div(style = "margin-top: 18px;"),
