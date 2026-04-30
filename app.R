@@ -9,6 +9,18 @@ library(stringi)
 
 # Game setup shared across the app.
 round_count <- 10L
+difficulty_choices <- c(
+  "Fácil" = "easy",
+  "Médio" = "medium",
+  "Difícil" = "hard"
+)
+difficulty_multipliers <- c(
+  easy = 1,
+  medium = 1.25,
+  hard = 1.5
+)
+hint_penalty <- 0.5
+default_difficulty <- "medium"
 app_base_url <- Sys.getenv(
   "APP_BASE_URL",
   "https://qave.com.br"
@@ -116,6 +128,7 @@ db_connection <- NULL
 leaderboard_cache <- NULL
 leaderboard_cache_loaded_at <- as.POSIXct(NA)
 leaderboard_cache_ttl_secs <- 30
+leaderboard_prior_games <- 5L
 state_name_lookup <- c(
   ac = "Acre",
   al = "Alagoas",
@@ -393,7 +406,7 @@ init_db <- function(config = db_config) {
           "CREATE TABLE IF NOT EXISTS game_results (",
           "id BIGSERIAL PRIMARY KEY,",
           "username TEXT NOT NULL,",
-          "score INTEGER NOT NULL,",
+          "score NUMERIC(5,1) NOT NULL,",
           "rounds INTEGER NOT NULL,",
           "played_at TIMESTAMPTZ NOT NULL",
           ")"
@@ -405,10 +418,10 @@ init_db <- function(config = db_config) {
         paste(
           "CREATE TABLE IF NOT EXISTS leaderboard (",
           "username TEXT PRIMARY KEY,",
-          "total_score INTEGER NOT NULL DEFAULT 0,",
+          "total_score NUMERIC(8,1) NOT NULL DEFAULT 0,",
           "games_played INTEGER NOT NULL DEFAULT 0,",
-          "best_score INTEGER NOT NULL DEFAULT 0,",
-          "last_score INTEGER NOT NULL DEFAULT 0,",
+          "best_score NUMERIC(5,1) NOT NULL DEFAULT 0,",
+          "last_score NUMERIC(5,1) NOT NULL DEFAULT 0,",
           "last_played_at TIMESTAMPTZ NOT NULL",
           ")"
         )
@@ -417,8 +430,26 @@ init_db <- function(config = db_config) {
       DBI::dbExecute(
         conn,
         paste(
-          "CREATE INDEX IF NOT EXISTS leaderboard_rank_idx",
-          "ON leaderboard (total_score DESC, best_score DESC, last_played_at DESC)"
+          "ALTER TABLE game_results",
+          "ALTER COLUMN score TYPE NUMERIC(5,1) USING score::numeric"
+        )
+      )
+
+      DBI::dbExecute(
+        conn,
+        paste(
+          "ALTER TABLE leaderboard",
+          "ALTER COLUMN total_score TYPE NUMERIC(8,1) USING total_score::numeric,",
+          "ALTER COLUMN best_score TYPE NUMERIC(5,1) USING best_score::numeric,",
+          "ALTER COLUMN last_score TYPE NUMERIC(5,1) USING last_score::numeric"
+        )
+      )
+
+      DBI::dbExecute(
+        conn,
+        paste(
+          "CREATE INDEX IF NOT EXISTS leaderboard_fair_rank_idx",
+          "ON leaderboard (best_score DESC, total_score DESC, last_played_at DESC)"
         )
       )
     },
@@ -475,12 +506,41 @@ read_leaderboard <- function(limit = 10L, config = db_config, refresh = FALSE) {
       DBI::dbGetQuery(
         conn,
         paste(
-          "SELECT username, total_score, games_played, best_score, last_score, last_played_at",
+          "WITH ranked_leaderboard AS (",
+          "SELECT",
+          "username,",
+          "best_score,",
+          "ROUND(total_score::numeric / NULLIF(games_played, 0), 2) AS average_score,",
+          "ROUND((",
+          "total_score::numeric +",
+          "$2::numeric * COALESCE((SUM(total_score) OVER ())::numeric / NULLIF(SUM(games_played) OVER (), 0), 0)",
+          ") / NULLIF(games_played + $2, 0), 2) AS fair_score,",
+          "total_score,",
+          "games_played,",
+          "last_score,",
+          "last_played_at",
           "FROM leaderboard",
-          "ORDER BY total_score DESC, best_score DESC, last_played_at DESC",
+          ")",
+          "SELECT",
+          "username,",
+          "best_score,",
+          "average_score,",
+          "fair_score,",
+          "total_score,",
+          "games_played,",
+          "last_score,",
+          "last_played_at",
+          "FROM ranked_leaderboard",
+          "ORDER BY",
+          "fair_score DESC,",
+          "average_score DESC,",
+          "games_played DESC,",
+          "best_score DESC,",
+          "total_score DESC,",
+          "last_played_at DESC",
           "LIMIT $1"
         ),
-        params = list(limit)
+        params = list(limit, leaderboard_prior_games)
       )
     },
     config = config
@@ -540,6 +600,84 @@ ui <- page_fluid(
     tags$meta(name = "twitter:description", content = app_description),
     tags$script(HTML("document.documentElement.lang = 'pt-BR';")),
     tags$script(type = "application/ld+json", HTML(app_structured_data)),
+    tags$script(HTML(
+      "
+      (function() {
+        var cookieMaxAge = 60 * 60 * 24 * 180;
+        var handlersRegistered = false;
+
+        function setCookie(name, value) {
+          document.cookie = name + '=' + encodeURIComponent(value) +
+            '; max-age=' + cookieMaxAge + '; path=/; SameSite=Lax';
+        }
+
+        function getCookie(name) {
+          var prefix = name + '=';
+          var cookies = document.cookie ? document.cookie.split('; ') : [];
+
+          for (var i = 0; i < cookies.length; i++) {
+            if (cookies[i].indexOf(prefix) === 0) {
+              return decodeURIComponent(cookies[i].slice(prefix.length));
+            }
+          }
+
+          return '';
+        }
+
+        function parseArrayCookie(name) {
+          var value = getCookie(name);
+
+          if (!value) {
+            return [];
+          }
+
+          try {
+            var parsed = JSON.parse(value);
+            return Array.isArray(parsed) ? parsed : [];
+          } catch (error) {
+            return [];
+          }
+        }
+
+        function sendSavedPreferences() {
+          if (!window.Shiny || !Shiny.setInputValue) {
+            return;
+          }
+
+          Shiny.setInputValue('qave_saved_preferences', {
+            username: getCookie('qave_username'),
+            states: parseArrayCookie('qave_states'),
+            families: parseArrayCookie('qave_families'),
+            difficulty: getCookie('qave_difficulty'),
+            nonce: Math.random()
+          }, { priority: 'event' });
+        }
+
+        function registerMessageHandlers() {
+          if (handlersRegistered) {
+            return;
+          }
+
+          if (!window.Shiny || !Shiny.addCustomMessageHandler) {
+            return;
+          }
+
+          Shiny.addCustomMessageHandler('qave_save_preferences', function(data) {
+            setCookie('qave_username', data.username || '');
+            setCookie('qave_states', JSON.stringify(data.states || []));
+            setCookie('qave_families', JSON.stringify(data.families || []));
+            setCookie('qave_difficulty', data.difficulty || '');
+          });
+          handlersRegistered = true;
+        }
+
+        document.addEventListener('shiny:connected', function() {
+          registerMessageHandlers();
+          sendSavedPreferences();
+        });
+      })();
+      "
+    )),
     tags$script(
       async = NA,
       src = "https://www.googletagmanager.com/gtag/js?id=G-JERY6P5EXE"
@@ -564,6 +702,7 @@ ui <- page_fluid(
       .shell {
         max-width: 1080px;
         margin: 32px auto;
+        padding: 0 14px;
       }
       .hero, .panel-card {
         background: rgba(255,255,255,0.88);
@@ -597,11 +736,56 @@ ui <- page_fluid(
       }
       .bird-photo {
         width: 100%;
-        border-radius: 18px;
+        border-radius: 14px;
         object-fit: contain;
         max-height: 430px;
         border: 3px solid rgba(31,111,80,0.10);
         background: rgba(31,111,80,0.05);
+      }
+      .round-media {
+        margin: 14px 0;
+      }
+      .answer-group .form-check {
+        margin: 0 0 10px;
+        padding: 0;
+      }
+      .answer-group .form-check-input {
+        position: absolute;
+        opacity: 0;
+        pointer-events: none;
+      }
+      .answer-group .form-check-label {
+        display: block;
+        width: 100%;
+        min-height: 48px;
+        padding: 12px 14px;
+        border: 1px solid rgba(31,111,80,0.18);
+        border-radius: 12px;
+        background: rgba(255,255,255,0.82);
+        color: #1f2933;
+        line-height: 1.25;
+      }
+      .answer-group .form-check-input:checked + .form-check-label {
+        border-color: #1f6f50;
+        background: rgba(31,111,80,0.12);
+        box-shadow: inset 0 0 0 1px rgba(31,111,80,0.34);
+      }
+      .answer-group .form-check-label em {
+        color: #52606d;
+      }
+      .round-actions {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        margin-top: 12px;
+      }
+      .round-actions .btn {
+        min-height: 44px;
+      }
+      .table-responsive {
+        margin-top: 8px;
       }
       .feedback {
         display: flex;
@@ -694,10 +878,22 @@ ui <- page_fluid(
       .table {
         margin-bottom: 0;
       }
+      .table th,
+      .table td {
+        white-space: nowrap;
+      }
       .credits {
         margin-top: 14px;
         font-size: 0.95rem;
         color: #52606d;
+      }
+      .hint-box {
+        margin: 12px 0 0;
+        padding: 10px 12px;
+        border-radius: 12px;
+        background: rgba(240,180,41,0.16);
+        color: #6b4a00;
+        font-weight: 700;
       }
       .seo-copy h2,
       .seo-copy h3 {
@@ -709,6 +905,48 @@ ui <- page_fluid(
       }
       .seo-copy ul {
         padding-left: 1.2rem;
+      }
+      .about-links {
+        display: flex;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-top: 10px;
+      }
+      @media (max-width: 700px) {
+        .shell {
+          margin: 10px auto 18px;
+          padding: 0 10px;
+        }
+        .hero,
+        .panel-card {
+          border-radius: 14px;
+          padding: 16px;
+          margin-bottom: 14px;
+        }
+        .hero h1 {
+          font-size: 1.8rem;
+        }
+        .hero p {
+          font-size: 1rem;
+        }
+        .bird-photo {
+          max-height: 52vh;
+          border-width: 2px;
+        }
+        .round-actions {
+          display: grid;
+          grid-template-columns: 1fr;
+        }
+        .round-actions .btn,
+        .panel-card > .btn,
+        .panel-card > .btn-group,
+        .panel-card .btn {
+          width: 100%;
+        }
+        .answer-group .form-check-label {
+          min-height: 52px;
+          padding: 13px 12px;
+        }
       }
     "
     ))
@@ -732,7 +970,34 @@ ui <- page_fluid(
         )
       )
     ),
-    uiOutput("app_body")
+    uiOutput("app_body"),
+    div(
+      class = "panel-card seo-copy",
+      h3("Sobre"),
+      p(
+        "Contato: ",
+        tags$a(
+          href = "mailto:raphael.saldanha@fiocruz.br",
+          "raphael.saldanha@fiocruz.br"
+        )
+      ),
+      p("Código e dados do projeto:"),
+      div(
+        class = "about-links",
+        tags$a(
+          href = "https://github.com/rfsaldanha/qave",
+          target = "_blank",
+          rel = "noopener noreferrer",
+          "App QAVE"
+        ),
+        tags$a(
+          href = "https://github.com/rfsaldanha/bird_scrapper",
+          target = "_blank",
+          rel = "noopener noreferrer",
+          "Bird Scrapper"
+        )
+      )
+    )
   )
 )
 
@@ -750,7 +1015,11 @@ server <- function(input, output, session) {
     available_species = NULL,
     selected_states = all_state_codes,
     selected_families = character(0),
+    difficulty = default_difficulty,
     current_choices = NULL,
+    current_hint = NULL,
+    current_hint_used = FALSE,
+    hints_used = 0L,
     feedback = NULL,
     leaderboard = NULL,
     score_saved = FALSE,
@@ -762,6 +1031,106 @@ server <- function(input, output, session) {
       class = "leaderboard-loading",
       div(class = "leaderboard-spinner"),
       tags$p(message)
+    )
+  }
+
+  leaderboard_methodology_ui <- function() {
+    tags$p(
+      class = "credits",
+      sprintf(
+        paste(
+          "A Pontuação Justa ordena o ranking por consistência, não só por uma",
+          "partida perfeita. Cada partida multiplica os acertos pela dificuldade:",
+          "Fácil x%.2f, Médio x%.2f e Difícil x%.2f; cada dica usada remove",
+          "%.1f ponto depois desse multiplicador. No fácil, a dica remove duas",
+          "alternativas incorretas; no médio, remove uma; no difícil, não há dica.",
+          "Depois, a Pontuação Justa combina a média real do jogador com a média",
+          "geral do ranking, usando %d partidas de confiança. Quanto mais partidas",
+          "a pessoa joga mantendo boa média, menos essa correção pesa. Em caso de",
+          "empate, entram média, partidas jogadas, melhor partida, pontuação total",
+          "e data mais recente."
+        ),
+        difficulty_multipliers[["easy"]],
+        difficulty_multipliers[["medium"]],
+        difficulty_multipliers[["hard"]],
+        hint_penalty,
+        leaderboard_prior_games
+      )
+    )
+  }
+
+  valid_saved_values <- function(values, valid_values) {
+    values <- unlist(values, use.names = FALSE)
+    values <- values[!is.na(values) & nzchar(values)]
+    intersect(values, valid_values)
+  }
+
+  restore_saved_preferences <- function(preferences) {
+    if (!is.list(preferences)) {
+      return(invisible(NULL))
+    }
+
+    saved_username <- trimws(input_value(preferences$username))
+    saved_states <- valid_saved_values(preferences$states, all_state_codes)
+
+    if (length(saved_states) == 0) {
+      saved_states <- all_state_codes
+    }
+
+    available_families <- family_choices_for_states(saved_states)
+    saved_families <- valid_saved_values(
+      preferences$families,
+      available_families
+    )
+
+    if (length(saved_families) == 0) {
+      saved_families <- available_families
+    }
+
+    saved_difficulty <- input_value(preferences$difficulty)
+
+    if (!saved_difficulty %in% unname(difficulty_choices)) {
+      saved_difficulty <- default_difficulty
+    }
+
+    if (nzchar(saved_username)) {
+      updateTextInput(session, "username", value = saved_username)
+    }
+
+    updatePickerInput(
+      session,
+      "state_filter",
+      selected = saved_states
+    )
+    updatePickerInput(
+      session,
+      "family_filter",
+      choices = available_families,
+      selected = saved_families
+    )
+    updateRadioButtons(
+      session,
+      "difficulty",
+      selected = saved_difficulty
+    )
+
+    invisible(NULL)
+  }
+
+  save_preferences_cookie <- function(
+    username,
+    selected_states,
+    selected_families,
+    difficulty
+  ) {
+    session$sendCustomMessage(
+      "qave_save_preferences",
+      list(
+        username = username,
+        states = unname(selected_states),
+        families = unname(selected_families),
+        difficulty = difficulty
+      )
     )
   }
 
@@ -876,17 +1245,63 @@ server <- function(input, output, session) {
       dplyr::pull(family)
   }
 
-  # Build four answer choices with only the fields needed for labels and answer checks.
-  build_round_choices <- function(species_row, available_species) {
-    distractor_pool <- available_species |>
+  sample_distractors <- function(pool, count) {
+    if (count <= 0L || nrow(pool) == 0L) {
+      return(pool[0, , drop = FALSE])
+    }
+
+    dplyr::slice_sample(pool, n = min(count, nrow(pool)))
+  }
+
+  # Build four answer choices. Harder modes choose more similar distractors.
+  build_round_choices <- function(
+    species_row,
+    available_species,
+    difficulty = default_difficulty
+  ) {
+    base_pool <- available_species |>
       dplyr::filter(scientific_name != species_row$scientific_name[[1]])
 
-    if (nrow(distractor_pool) < 3L) {
+    if (nrow(base_pool) < 3L) {
       stop("Not enough distractor species available to build the round.")
     }
 
-    distractors <- distractor_pool |>
-      dplyr::slice_sample(n = 3L) |>
+    if (identical(difficulty, "hard")) {
+      target_name <- paste(
+        species_row$common_name_norm[[1]],
+        species_row$scientific_name_norm[[1]]
+      )
+      candidate_names <- paste(
+        base_pool$common_name_norm,
+        base_pool$scientific_name_norm
+      )
+      distractors <- base_pool |>
+        dplyr::mutate(name_distance = as.numeric(utils::adist(
+          target_name,
+          candidate_names
+        )[1, ])) |>
+        dplyr::arrange(
+          dplyr::desc(family == species_row$family[[1]]),
+          name_distance
+        ) |>
+        dplyr::slice_head(n = min(8L, nrow(base_pool))) |>
+        sample_distractors(3L)
+    } else if (identical(difficulty, "medium")) {
+      same_family <- base_pool |>
+        dplyr::filter(family == species_row$family[[1]])
+      family_distractors <- sample_distractors(same_family, 3L)
+      remaining_needed <- 3L - nrow(family_distractors)
+      remaining_pool <- base_pool |>
+        dplyr::filter(!scientific_name %in% family_distractors$scientific_name)
+      distractors <- dplyr::bind_rows(
+        family_distractors,
+        sample_distractors(remaining_pool, remaining_needed)
+      )
+    } else {
+      distractors <- sample_distractors(base_pool, 3L)
+    }
+
+    distractors <- distractors |>
       dplyr::select(
         common_name,
         scientific_name,
@@ -928,9 +1343,77 @@ server <- function(input, output, session) {
     }
   }
 
+  difficulty_label <- function(difficulty = state$difficulty) {
+    label <- names(difficulty_choices)[match(difficulty, difficulty_choices)]
+
+    if (is.na(label)) {
+      names(difficulty_choices)[match(default_difficulty, difficulty_choices)]
+    } else {
+      label
+    }
+  }
+
+  difficulty_multiplier <- function(difficulty = state$difficulty) {
+    multiplier <- difficulty_multipliers[[difficulty]]
+
+    if (is.null(multiplier) || is.na(multiplier)) {
+      difficulty_multipliers[[default_difficulty]]
+    } else {
+      multiplier
+    }
+  }
+
+  final_score <- function(
+    score = state$score,
+    hints_used = state$hints_used,
+    difficulty = state$difficulty
+  ) {
+    multiplied_score <- floor(as.integer(score) * difficulty_multiplier(difficulty))
+    max(multiplied_score - (as.integer(hints_used) * hint_penalty), 0)
+  }
+
+  leaderboard_score <- function(
+    score = state$score,
+    hints_used = state$hints_used,
+    difficulty = state$difficulty
+  ) {
+    round(final_score(score, hints_used, difficulty), 1)
+  }
+
+  format_score <- function(score) {
+    if (identical(score, floor(score))) {
+      as.character(as.integer(score))
+    } else {
+      sprintf("%.1f", score)
+    }
+  }
+
+  observeEvent(
+    input$qave_saved_preferences,
+    {
+      session$onFlushed(
+        function() {
+          restore_saved_preferences(input$qave_saved_preferences)
+        },
+        once = TRUE
+      )
+    },
+    ignoreInit = TRUE
+  )
+
   # Start or restart a game by sampling the round species and resetting state.
-  start_game <- function(username, selected_states, selected_families) {
+  start_game <- function(
+    username,
+    selected_states,
+    selected_families,
+    difficulty = default_difficulty
+  ) {
     available_species <- species_pool(selected_states, selected_families)
+    difficulty <- if (difficulty %in% unname(difficulty_choices)) {
+      difficulty
+    } else {
+      default_difficulty
+    }
 
     if (length(selected_states) == 0) {
       showNotification(
@@ -976,10 +1459,15 @@ server <- function(input, output, session) {
     state$available_species <- available_species
     state$selected_states <- selected_states
     state$selected_families <- selected_families
+    state$difficulty <- difficulty
     state$current_choices <- build_round_choices(
       questions[1, , drop = FALSE],
-      available_species
+      available_species,
+      difficulty
     )
+    state$current_hint <- NULL
+    state$current_hint_used <- FALSE
+    state$hints_used <- 0L
     state$feedback <- NULL
     state$leaderboard <- NULL
     state$score_saved <- FALSE
@@ -990,7 +1478,7 @@ server <- function(input, output, session) {
   # Show the finished state immediately, then persist the score once per game.
   finish_game <- function() {
     final_username <- isolate(state$username)
-    final_score <- isolate(state$score)
+    saved_score <- isolate(leaderboard_score())
 
     state$finished <- TRUE
 
@@ -1016,7 +1504,7 @@ server <- function(input, output, session) {
 
               tryCatch(
                 {
-                  record_score(final_username, final_score, round_count)
+                  record_score(final_username, saved_score, round_count)
                   state$score_saved <- TRUE
                   load_leaderboard_async(10L, refresh = TRUE)
                 },
@@ -1055,6 +1543,7 @@ server <- function(input, output, session) {
     } else {
       input$family_filter
     }
+    difficulty <- input_value(input$difficulty)
 
     if (!nzchar(username)) {
       showNotification(
@@ -1064,7 +1553,21 @@ server <- function(input, output, session) {
       return()
     }
 
-    start_game(username, selected_states, selected_families)
+    game_started <- start_game(
+      username,
+      selected_states,
+      selected_families,
+      difficulty
+    )
+
+    if (isTRUE(game_started)) {
+      save_preferences_cookie(
+        username,
+        selected_states,
+        selected_families,
+        difficulty
+      )
+    }
   })
 
   # Keep the family picker aligned with the states chosen on the start screen.
@@ -1109,13 +1612,57 @@ server <- function(input, output, session) {
     state$viewing_leaderboard <- FALSE
   })
 
+  observeEvent(input$show_hint, {
+    req(state$started, !state$finished)
+
+    if (identical(state$difficulty, "hard")) {
+      showNotification(
+        "No nível difícil, não há dica disponível.",
+        type = "message"
+      )
+      return()
+    }
+
+    if (isTRUE(state$current_hint_used)) {
+      return()
+    }
+
+    species <- current_species()
+    wrong_choices <- state$current_choices |>
+      dplyr::filter(scientific_name != species$scientific_name[[1]])
+    correct_choice <- state$current_choices |>
+      dplyr::filter(scientific_name == species$scientific_name[[1]])
+    remove_count <- if (identical(state$difficulty, "easy")) {
+      2L
+    } else {
+      1L
+    }
+    removed_choices <- sample_distractors(wrong_choices, remove_count)
+    retained_wrong_choices <- wrong_choices |>
+      dplyr::filter(!choice_id %in% removed_choices$choice_id)
+
+    state$current_choices <- dplyr::bind_rows(
+      correct_choice,
+      retained_wrong_choices
+    ) |>
+      dplyr::slice_sample(prop = 1)
+    state$hints_used <- state$hints_used + 1L
+    state$current_hint_used <- TRUE
+
+    state$current_hint <- sprintf(
+      "Dica: %d alternativa(s) incorreta(s) foram removidas. Usar dica reduz %.1f ponto da pontuação final.",
+      nrow(removed_choices),
+      hint_penalty
+    )
+  })
+
   # Evaluate the selected answer, show the reveal text, and advance the game.
   observeEvent(input$submit_guess, {
     req(
       state$started,
       !state$finished,
       !is.null(state$current_choices),
-      nrow(state$current_choices) == 4L
+      nrow(state$current_choices) >= 2L
     )
 
     guess <- input_value(input$guess)
@@ -1132,11 +1679,19 @@ server <- function(input, output, session) {
     round_choices <- isolate(state$current_choices)
     selected_choice <- round_choices |>
       dplyr::filter(choice_id == guess)
-    matched <- nrow(selected_choice) == 1L &&
-      identical(
-        selected_choice$scientific_name_norm[[1]],
-        species$scientific_name_norm[[1]]
+
+    if (nrow(selected_choice) != 1L) {
+      showNotification(
+        "Selecione uma das opções visíveis antes de enviar sua resposta.",
+        type = "warning"
       )
+      return()
+    }
+
+    matched <- identical(
+      selected_choice$scientific_name_norm[[1]],
+      species$scientific_name_norm[[1]]
+    )
 
     if (matched) {
       state$score <- state$score + 1L
@@ -1172,8 +1727,11 @@ server <- function(input, output, session) {
       state$current_index <- state$current_index + 1L
       state$current_choices <- build_round_choices(
         current_species(),
-        state$available_species
+        state$available_species,
+        state$difficulty
       )
+      state$current_hint <- NULL
+      state$current_hint_used <- FALSE
     }
   })
 
@@ -1182,7 +1740,8 @@ server <- function(input, output, session) {
     start_game(
       state$username,
       state$selected_states,
-      state$selected_families
+      state$selected_families,
+      state$difficulty
     )
   })
 
@@ -1197,8 +1756,9 @@ server <- function(input, output, session) {
             if (state$leaderboard_loading) {
               leaderboard_loading_ui()
             } else {
-              tableOutput("leaderboard_table")
+              div(class = "table-responsive", tableOutput("leaderboard_table"))
             },
+            leaderboard_methodology_ui(),
             div(style = "margin-top: 18px;"),
             actionButton("back_to_start", "Voltar", class = "btn-warning")
           )
@@ -1251,11 +1811,27 @@ server <- function(input, output, session) {
               size = 10
             )
           ),
+          radioButtons(
+            "difficulty",
+            "Dificuldade",
+            choices = difficulty_choices,
+            selected = default_difficulty,
+            inline = TRUE
+          ),
           p(
             class = "credits",
             sprintf(
-              "%d estados e todas as famílias disponíveis para eles já vêm selecionados por padrão.",
-              length(all_state_codes)
+              paste(
+                "%d estados e todas as famílias disponíveis para eles já vêm",
+                "selecionados por padrão. Multiplicadores: Fácil x%.2f, Médio x%.2f",
+                "e Difícil x%.2f. No nível difícil, as alternativas tendem a ser",
+                "da mesma família e com nomes mais parecidos. Dicas removem duas",
+                "alternativas no fácil, uma no médio, e não aparecem no difícil."
+              ),
+              length(all_state_codes),
+              difficulty_multipliers[["easy"]],
+              difficulty_multipliers[["medium"]],
+              difficulty_multipliers[["hard"]]
             )
           ),
           actionButton("start_game", "Começar a jogar", class = "btn-success"),
@@ -1272,7 +1848,14 @@ server <- function(input, output, session) {
         state$current_index,
         round_count
       )
-      score_label <- sprintf("Pontuação: %d", state$score)
+      score_label <- sprintf(
+        "Acertos: %d | Dicas: %d | %s x%.2f | Pontuação atual: %s",
+        state$score,
+        state$hints_used,
+        difficulty_label(),
+        difficulty_multiplier(),
+        format_score(final_score())
+      )
 
       return(
         tagList(
@@ -1295,7 +1878,7 @@ server <- function(input, output, session) {
               )
             ),
             tags$div(
-              style = "margin: 18px 0;",
+              class = "round-media",
               if (!isTRUE(is.na(species$audio_url[[1]]))) {
                 tags$audio(
                   src = species$audio_url[[1]],
@@ -1310,19 +1893,39 @@ server <- function(input, output, session) {
                 )
               }
             ),
-            radioButtons(
-              "guess",
-              "Escolha uma opção",
-              choiceNames = build_choice_names(state$current_choices),
-              choiceValues = unname(as.character(
-                state$current_choices$choice_id
-              ))
+            div(
+              class = "answer-group",
+              radioButtons(
+                "guess",
+                "Escolha uma opção",
+                choiceNames = build_choice_names(state$current_choices),
+                choiceValues = unname(as.character(
+                  state$current_choices$choice_id
+                ))
+              )
             ),
-            actionButton(
-              "submit_guess",
-              "Enviar resposta",
-              class = "btn-warning"
-            )
+            div(
+              class = "round-actions",
+              actionButton(
+                "submit_guess",
+                "Enviar resposta",
+                class = "btn-warning"
+              ),
+              if (!identical(state$difficulty, "hard")) {
+                actionButton(
+                "show_hint",
+                if (identical(state$difficulty, "easy")) {
+                  sprintf("Dica: remover 2 (-%.1f)", hint_penalty)
+                } else {
+                  sprintf("Dica: remover 1 (-%.1f)", hint_penalty)
+                },
+                class = "btn-success"
+              )
+              }
+            ),
+            if (!is.null(state$current_hint)) {
+              div(class = "hint-box", state$current_hint)
+            }
           )
         )
       )
@@ -1334,10 +1937,14 @@ server <- function(input, output, session) {
       p(
         class = "score-highlight",
         sprintf(
-          "%s fez %d de %d pontos.",
+          "%s acertou %d de %d, usou %d dica(s), jogou no nível %s (x%.2f) e ficou com %s ponto(s).",
           state$username,
           state$score,
-          round_count
+          round_count,
+          state$hints_used,
+          difficulty_label(),
+          difficulty_multiplier(),
+          format_score(final_score())
         )
       ),
       feedback_ui(state$feedback),
@@ -1345,8 +1952,9 @@ server <- function(input, output, session) {
       if (state$leaderboard_loading) {
         leaderboard_loading_ui("Atualizando ranking...")
       } else {
-        tableOutput("leaderboard_table")
+        div(class = "table-responsive", tableOutput("leaderboard_table"))
       },
+      leaderboard_methodology_ui(),
       div(style = "margin-top: 18px;"),
       actionButton("play_again", "Jogar novamente", class = "btn-success")
     )
@@ -1361,6 +1969,21 @@ server <- function(input, output, session) {
       )
 
       leaderboard <- state$leaderboard
+      leaderboard$rank <- seq_len(nrow(leaderboard))
+      leaderboard <- leaderboard |>
+        dplyr::select(
+          rank,
+          username,
+          fair_score,
+          best_score,
+          average_score,
+          total_score,
+          games_played,
+          last_score,
+          last_played_at
+        )
+      leaderboard$average_score <- sprintf("%.2f", leaderboard$average_score)
+      leaderboard$fair_score <- sprintf("%.2f", leaderboard$fair_score)
       leaderboard$last_played_at <- if (
         inherits(leaderboard$last_played_at, "POSIXt")
       ) {
@@ -1381,10 +2004,13 @@ server <- function(input, output, session) {
         )
       }
       names(leaderboard) <- c(
+        "Posição",
         "Usuário",
+        "Pontuação Justa",
+        "Melhor Partida",
+        "Média",
         "Pontuação Total",
         "Partidas Jogadas",
-        "Melhor Partida",
         "Última Pontuação",
         "Última Partida"
       )
